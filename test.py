@@ -183,7 +183,10 @@ def show_results_summary(title, messages):
 
 async def process_dashboard(url, start_time, end_time):
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+    headless=True,
+    executable_path=r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+)
         context = await browser.new_context()
         page = await context.new_page()
 
@@ -218,7 +221,7 @@ btn_frame.pack(pady=5)
 
 ttk.Button(btn_frame, text="Add Dashboard", command=add_dashboard).grid(row=0, column=0, padx=5)
 ttk.Button(btn_frame, text="Delete Dashboard", command=delete_dashboard).grid(row=0, column=1, padx=5)
-ttk.Button(btn_frame, text="Login to Splunk", command=prompt_login).grid(row=0, column=2, padx=5)
+ttk.Button(btn_frame, text="Login Credentials", command=prompt_login).grid(row=0, column=2, padx=5)
 
 dashboards_box = tk.Listbox(root, selectmode=tk.MULTIPLE, width=80, height=10)
 dashboards_box.pack(pady=10)
