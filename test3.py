@@ -324,10 +324,12 @@ def analyze_selected():
     progress_bar['maximum'] = len(selected_urls)
     progress_bar['value'] = 0
     logging.info(f"Starting analysis for {len(selected_urls)} dashboards from {start} to {end}")
+    # The analyze_dashboards function needs to be defined
     Thread(target=lambda: asyncio.run(analyze_dashboards(selected_urls, start, end)),
            daemon=True).start()
 
-# --- NEW: Intelligent Splunk Dashboard Waiting Function ---
+
+# --- Intelligent Splunk Dashboard Waiting Function ---
 async def _wait_for_splunk_dashboard_to_load(page: Page, timeout_ms: int = SPLUNK_WAIT_TIMEOUT_MS):
     """
     Intelligently waits for Splunk dashboard panels to load their content.
@@ -420,73 +422,95 @@ async def visit_dashboard(url, start, end):
     """
     retries = 3
     for attempt in range(1, retries + 1):
+        browser = None
+        context = None
+        page = None
         try:
             async with async_playwright() as p:
-                # Specify executable_path only if you have a non-default Chrome location
-                # On Windows, it often finds it automatically.
-                # If you need a specific version, then: executable_path="C:\Program Files\Google\Chrome\Application\chrome.exe"
-                browser = await p.chromium.launch(headless=True) # Set headless=False for debugging
+                # Set headless=False for debugging, change to True for production
+                browser = await p.chromium.launch(headless=True) 
+                context = await browser.new_context()
+                page = await context.new_page()
+                logging.info(f"Navigating to {url} (Attempt {attempt}/{retries})")
+                await page.goto(url, wait_until="load", timeout=SPLUNK_WAIT_TIMEOUT_MS) # Use 'load' initially for faster page load
+
+                # Check for login page first
+                if await page.query_selector('input[placeholder="Username"]'):
+                    logging.info("Splunk login page detected.")
+                    if not session["username"] or not session["password"]:
+                        raise RuntimeError("Login required but credentials not set. Please set them in settings.")
+                    await page.fill('input[placeholder="Username"]', session["username"])
+                    await page.fill('input[placeholder="Password"]', session["password"])
+                    await page.press('input[placeholder="Password"]', "Enter")
+                    logging.info("Attempted login, waiting for navigation...")
+                    # Wait for navigation after login, then apply intelligent wait
+                    await page.wait_for_url(url, wait_until="domcontentloaded", timeout=SPLUNK_WAIT_TIMEOUT_MS) # Wait for original URL
+
+                    # Give it a moment for elements to appear after navigation, then intelligent wait
+                    await asyncio.sleep(2) # Small pause
+                    await _wait_for_splunk_dashboard_to_load(page, SPLUNK_WAIT_TIMEOUT_MS)
+                    logging.info("Splunk dashboard loaded after login.")
+
+                else:
+                    logging.info("No login page detected, proceeding with dashboard load wait.")
+                    # Directly apply intelligent wait if no login was needed
+                    await _wait_for_splunk_dashboard_to_load(page, SPLUNK_WAIT_TIMEOUT_MS)
+
+                safe_filename = sanitize_filename(url)
+                # Use EST time for the screenshot stamp.
+                stamp = datetime.now(est).strftime("%Y%m%d_%H%M%S")
+                screenshot_path = os.path.join(SCREENSHOT_DIR, f"screenshot_{safe_filename}_{stamp}.png")
+                
+                logging.info(f"Taking screenshot of {url} at {screenshot_path}")
+                await page.screenshot(path=screenshot_path, full_page=True)
+                return f"✅ {url} ({start} to {end}): Screenshot -> {screenshot_path}"
+
+        except Exception as e:
+            logging.error(f"Error during page operations for {url} (Attempt {attempt}/{retries}): {e}")
+            # Capture a screenshot on error for debugging, if page object exists
+            if page:
+                error_screenshot_path = os.path.join(SCREENSHOT_DIR, f"error_screenshot_{sanitize_filename(url)}_{stamp if 'stamp' in locals() else 'unknown'}_attempt{attempt}.png")
                 try:
-                    context = await browser.new_context()
-                    page = await context.new_page()
-                    logging.info(f"Navigating to {url} (Attempt {attempt}/{retries})")
-                    await page.goto(url, wait_until="load", timeout=SPLUNK_WAIT_TIMEOUT_MS) # Use 'load' initially for faster page load
-
-                    # Check for login page first
-                    if await page.query_selector('input[placeholder="Username"]'):
-                        logging.info("Splunk login page detected.")
-                        if not session["username"] or not session["password"]:
-                            raise RuntimeError("Login required but credentials not set. Please set them in settings.")
-                        await page.fill('input[placeholder="Username"]', session["username"])
-                        await page.fill('input[placeholder="Password"]', session["password"])
-                        await page.press('input[placeholder="Password"]', "Enter")
-                        logging.info("Attempted login, waiting for navigation...")
-                        # Wait for navigation after login, then apply intelligent wait
-                        await page.wait_for_url(url, wait_until="domcontentloaded", timeout=SPLUNK_WAIT_TIMEOUT_MS) # Wait for original URL
-
-                        # Give it a moment for elements to appear after navigation, then intelligent wait
-                        await asyncio.sleep(2) # Small pause
-                        await _wait_for_splunk_dashboard_to_load(page, SPLUNK_WAIT_TIMEOUT_MS)
-                        logging.info("Splunk dashboard loaded after login.")
-
-                    else:
-                        logging.info("No login page detected, proceeding with dashboard load wait.")
-                        # Directly apply intelligent wait if no login was needed
-                        await _wait_for_splunk_dashboard_to_load(page, SPLUNK_WAIT_TIMEOUT_MS)
-
-                    safe_filename = sanitize_filename(url)
-                    # Use EST time for the screenshot stamp.
-                    stamp = datetime.now(est).strftime("%Y%m%d_%H%M%S")
-                    screenshot_path = os.path.join(SCREENSHOT_DIR, f"screenshot_{safe_filename}_{stamp}.png")
-                    
-                    logging.info(f"Taking screenshot of {url} at {screenshot_path}")
-                    await page.screenshot(path=screenshot_path, full_page=True)
-                    return f"✅ {url} ({start} to {end}): Screenshot -> {screenshot_path}"
-
-                except Exception as e:
-                    logging.error(f"Error during page operations for {url} (Attempt {attempt}/{retries}): {e}")
-                    # Capture a screenshot on error for debugging
-                    error_screenshot_path = os.path.join(SCREENSHOT_DIR, f"error_screenshot_{sanitize_filename(url)}_{stamp}_attempt{attempt}.png")
-                    try:
-                        await page.screenshot(path=error_screenshot_path)
-                        logging.error(f"Error screenshot saved to {error_screenshot_path}")
-                    except Exception as se:
-                        logging.error(f"Failed to capture error screenshot: {se}")
-                    
-                    if attempt == retries:
-                        return f"❌ {url}: Failed after {retries} attempts. Last error: {e}"
-                    logging.info(f"Retrying {url} in 2 seconds...")
-                    await asyncio.sleep(2) # Wait before retrying
-                finally:
-                    if 'browser' in locals() and browser.is_connected():
-                        await browser.close()
-                    logging.info(f"Browser closed for {url}")
-        except Exception as e: # Catch errors during playwright launch or general setup
-            logging.error(f"Playwright launch or setup failed for {url} (Attempt {attempt}/{retries}): {e}")
+                    await page.screenshot(path=error_screenshot_path)
+                    logging.error(f"Error screenshot saved to {error_screenshot_path}")
+                except Exception as se:
+                    logging.error(f"Failed to capture error screenshot: {se}")
+            
             if attempt == retries:
-                return f"❌ {url}: Playwright setup failed after {retries} attempts. Last error: {e}"
+                return f"❌ {url}: Failed after {retries} attempts. Last error: {e}"
             logging.info(f"Retrying {url} in 2 seconds...")
-            await asyncio.sleep(2)
+            await asyncio.sleep(2) # Wait before retrying
+        finally:
+            if context:
+                await context.close()
+            if browser:
+                await browser.close()
+            logging.info(f"Browser closed for {url}")
+
+
+async def analyze_dashboards(urls, start, end):
+    """
+    Asynchronously analyzes a list of dashboard URLs.
+    This function creates and manages the Playwright browser context for each URL
+    and updates the progress bar.
+    """
+    results = []
+    completed = 0
+    # Create tasks for each dashboard visit
+    tasks = [visit_dashboard(url, start, end) for url in urls]
+
+    # Process tasks as they complete
+    for task in asyncio.as_completed(tasks):
+        result = await task
+        results.append(result)
+        completed += 1
+        # Update the progress bar on the main thread
+        app.after(0, lambda c=completed: progress_bar.config(value=c))
+        logging.info(f"Completed {completed}/{len(urls)} dashboards.")
+    
+    logging.info("All dashboard analyses completed.")
+    # Show results on the main thread
+    app.after(0, lambda: show_results(results, start, end))
 
 
 def show_results(messages, start, end):
