@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from threading import Thread
 from playwright.async_api import async_playwright
 
-# ========== Global Config ==========
+# ========== Session Config ==========
 session_cache = {
     "splunk_username": None,
     "splunk_password": None,
@@ -18,7 +18,6 @@ SCREENSHOT_DIR = os.path.join("screenshots", datetime.now(timezone.utc).strftime
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 VALID_URL_REGEX = re.compile(r'^https?://.+')
 
-# ========== Signal Handling ==========
 def graceful_shutdown(*_):
     clear_credentials()
     sys.exit(0)
@@ -26,7 +25,7 @@ def graceful_shutdown(*_):
 signal.signal(signal.SIGINT, graceful_shutdown)
 signal.signal(signal.SIGTERM, graceful_shutdown)
 
-# ========== Utilities ==========
+# ========== Utils ==========
 def sanitize_filename(url):
     netloc = urlparse(url).netloc.replace('.', '_')
     uid = uuid.uuid4().hex[:6]
@@ -36,23 +35,16 @@ def clear_credentials():
     session_cache["splunk_username"] = None
     session_cache["splunk_password"] = None
 
-# ========== File Persistence ==========
 def load_dashboards():
-    try:
-        if os.path.exists(DASHBOARD_STORE):
-            with open(DASHBOARD_STORE, "r") as f:
-                session_cache["onboarded_dashboards"] = json.load(f)
-    except Exception as e:
-        messagebox.showerror("Error", f"Failed to load dashboards: {e}")
+    if os.path.exists(DASHBOARD_STORE):
+        with open(DASHBOARD_STORE, "r") as f:
+            session_cache["onboarded_dashboards"] = json.load(f)
 
 def save_dashboards():
-    try:
-        with open(DASHBOARD_STORE, "w") as f:
-            json.dump(session_cache["onboarded_dashboards"], f, indent=2)
-    except Exception as e:
-        messagebox.showerror("Error", f"Failed to save dashboards: {e}")
+    with open(DASHBOARD_STORE, "w") as f:
+        json.dump(session_cache["onboarded_dashboards"], f, indent=2)
 
-# ========== UI Functions ==========
+# ========== GUI Actions ==========
 def add_dashboard():
     name = simpledialog.askstring("Dashboard Name", "Enter a name:")
     url = simpledialog.askstring("Dashboard URL", "Enter the URL:")
@@ -74,7 +66,7 @@ def delete_dashboard():
         messagebox.showinfo("Select", "Select a dashboard to delete.")
         return
     name = dashboards_box.get(selected[0])
-    if messagebox.askyesno("Confirm Delete", f"Are you sure you want to delete '{name}'?"):
+    if messagebox.askyesno("Confirm Delete", f"Delete dashboard '{name}'?"):
         session_cache["onboarded_dashboards"] = [
             d for d in session_cache["onboarded_dashboards"] if d["name"] != name
         ]
@@ -121,7 +113,8 @@ def analyze_selected():
                 datetime.strptime(end_str, "%Y-%m-%d %H:%M")
                 result["start"] = start_str
                 result["end"] = end_str
-                popup.destroy()
+                popup.withdraw()
+                popup.after(100, popup.destroy)
             except ValueError:
                 messagebox.showerror("Invalid", "Time must be in HH:MM format.")
 
@@ -144,6 +137,7 @@ def analyze_selected():
 
     Thread(target=run).start()
 
+# ========== LLM Summary ==========
 def show_results_summary(messages):
     popup = tk.Toplevel()
     popup.title("LLM Summary")
@@ -154,7 +148,7 @@ def show_results_summary(messages):
     text.config(state=tk.DISABLED)
     tk.Button(popup, text="Close", command=popup.destroy).pack(pady=5)
 
-# ========== Main Async Dashboard Processing ==========
+# ========== Async Processing ==========
 async def run_all_dashboards(urls, start, end):
     messages = []
     results = await asyncio.gather(*(process_dashboard(u, start, end) for u in urls), return_exceptions=True)
@@ -206,7 +200,7 @@ async def process_dashboard(url, start, end):
 # ========== GUI Setup ==========
 root = tk.Tk()
 root.title("Splunk Dashboard Analyzer")
-root.geometry("650x450")
+root.geometry("650x480")
 
 ttk.Button(root, text="Add Dashboard", command=add_dashboard).pack(pady=5)
 ttk.Button(root, text="Delete Dashboard", command=delete_dashboard).pack(pady=5)
