@@ -333,7 +333,7 @@ async def visit_dashboard(url, start, end):
         try:
             playwright = await async_playwright().start()
             try:
-                browser = await playwright.chromium.launch(headless=True)
+                browser = await p.chromium.launch(headless=False,executable_path="C:\Program Files\Google\Chrome\Application\chrome.exe")
                 try:
                     context = await browser.new_context()
                     try:
@@ -341,7 +341,8 @@ async def visit_dashboard(url, start, end):
                         await page.goto(url, wait_until="networkidle")
                         
                         # Wait for panels to appear.
-                        await page.wait_for_selector("div.dashboard-panel", timeout=30000)
+                        #await page.wait_for_selector("div.dashboard-panel", timeout=30000)
+                        await self._wait_for_dashboard_load_async(page, wait_timeout)
                         # Wait until each panel is rendered (nonzero height) and does NOT include "Waiting for input"
                         await page.wait_for_function(
                             """() => {
