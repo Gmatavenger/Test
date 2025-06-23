@@ -14,7 +14,7 @@ import tkinter as tk
 from tkinter import ttk, simpledialog, messagebox, scrolledtext
 from tkcalendar import DateEntry
 
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Playwright, BrowserContext, Page
 from dotenv import load_dotenv
 import pytz
 
@@ -67,12 +67,16 @@ os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 scheduled = False
 schedule_interval = 0  # in seconds
 
+# Define a default wait timeout for Splunk operations
+SPLUNK_WAIT_TIMEOUT_MS = 60000 # 60 seconds
+
 # ------------------------------------------------------------------------------
 # Signal & Exit Handling
 # ------------------------------------------------------------------------------
 def cleanup_and_exit(*_):
     session["username"] = None
     session["password"] = None
+    logging.info("Application exiting.")
     sys.exit(0)
 
 signal.signal(signal.SIGINT, cleanup_and_exit)
@@ -85,13 +89,16 @@ def load_dashboards():
     if os.path.exists(DASHBOARD_FILE):
         with open(DASHBOARD_FILE, "r") as f:
             session["dashboards"] = json.load(f)
+        logging.info(f"Loaded {len(session['dashboards'])} dashboards from {DASHBOARD_FILE}")
 
 def save_dashboards():
     with open(DASHBOARD_FILE, "w") as f:
         json.dump(session["dashboards"], f, indent=2)
+    logging.info(f"Saved {len(session['dashboards'])} dashboards to {DASHBOARD_FILE}")
 
 def sanitize_filename(url):
     netloc = urlparse(url).netloc.replace('.', '_')
+    # Use a part of UUID for uniqueness, avoiding extremely long names
     uid = uuid.uuid4().hex[:6]
     return f"{netloc}_{uid}"
 
@@ -99,11 +106,11 @@ def sanitize_filename(url):
 # Credential Management
 # ------------------------------------------------------------------------------
 def manage_credentials():
-    new_username = simpledialog.askstring("Manage Credentials", "Enter new username:", 
+    new_username = simpledialog.askstring("Manage Credentials", "Enter new username:",
                                           initialvalue=session.get("username", ""))
     if new_username is not None:
         session["username"] = new_username.strip()
-    new_password = simpledialog.askstring("Manage Credentials", "Enter new password:", 
+    new_password = simpledialog.askstring("Manage Credentials", "Enter new password:",
                                           show="*", initialvalue=session.get("password", ""))
     if new_password is not None:
         session["password"] = new_password.strip()
@@ -119,17 +126,19 @@ def add_dashboard():
         return
     url = simpledialog.askstring("Dashboard URL", "Enter dashboard URL:")
     if not url or not url.startswith("http"):
+        messagebox.showerror("Invalid URL", "Dashboard URL must start with http or https.")
         return
     group = simpledialog.askstring("Dashboard Group", "Enter dashboard group (optional):")
     if not group:
         group = "Default"
-    if any(d["name"].strip() == name.strip() for d in session["dashboards"]):
-        messagebox.showerror("Duplicate", "Dashboard name already exists.")
+    if any(d["name"].strip().lower() == name.strip().lower() for d in session["dashboards"]):
+        messagebox.showerror("Duplicate", "Dashboard name already exists (case-insensitive).")
         return
     session["dashboards"].append({"name": name.strip(), "url": url.strip(), "group": group.strip()})
     save_dashboards()
     refresh_dashboard_list()
     update_group_filter()
+    logging.info(f"Added dashboard: {name} (URL: {url}, Group: {group})")
 
 def delete_dashboard():
     selected_indices = listbox.curselection()
@@ -143,12 +152,14 @@ def delete_dashboard():
     save_dashboards()
     refresh_dashboard_list()
     update_group_filter()
+    logging.info(f"Deleted dashboards: {', '.join(selected_names)}")
 
 def refresh_dashboard_list():
     listbox.delete(0, tk.END)
     selected_filter = group_filter.get() if group_filter else "All"
     for dashboard in session["dashboards"]:
-        if selected_filter == "All" or dashboard.get("group", "Default") == selected_filter:
+        group_name = dashboard.get("group", "Default")
+        if selected_filter == "All" or group_name == selected_filter:
             listbox.insert(tk.END, dashboard["name"])
 
 def update_group_filter():
@@ -157,7 +168,7 @@ def update_group_filter():
         groups.add(d.get("group", "Default"))
     group_filter_values = sorted(list(groups))
     group_filter['values'] = group_filter_values
-    group_filter.set("All")
+    group_filter.set("All") # Reset filter to All after update
 
 # ------------------------------------------------------------------------------
 # Advanced Time Range Selection Using EST and Dropdown Options
@@ -234,7 +245,7 @@ def get_time_range():
                 s_time = start_time.get().strip()
                 e_time = end_time.get().strip()
                 if not re.match(r"^\d{2}:\d{2}$", s_time) or not re.match(r"^\d{2}:\d{2}$", e_time):
-                    raise ValueError("Time must be in HH:MM format.")
+                    raise ValueError("Time must be in HH:MM format (e.g., 09:30).")
                 start_str = f"{start_date.get_date():%Y-%m-%d} {s_time}"
                 end_str = f"{end_date.get_date():%Y-%m-%d} {e_time}"
                 start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M")
@@ -261,11 +272,14 @@ def get_time_range():
 # ------------------------------------------------------------------------------
 def schedule_analysis():
     interval_str = simpledialog.askstring("Schedule Analysis", 
-                                            "Enter interval in seconds for repeated analysis:")
+                                            "Enter interval in seconds for repeated analysis (min 60s):")
     try:
         interval = int(interval_str)
-        if interval <= 0:
-            raise ValueError
+        if interval < 60: # Minimum 1 minute interval
+            raise ValueError("Interval must be at least 60 seconds.")
+    except ValueError as ve:
+        messagebox.showerror("Invalid Interval", str(ve))
+        return
     except Exception:
         messagebox.showerror("Invalid Interval", "Please enter a valid positive integer for seconds.")
         return
@@ -279,6 +293,7 @@ def schedule_analysis():
 def run_scheduled_analysis():
     if not scheduled:
         return
+    logging.info("Initiating scheduled analysis.")
     analyze_selected()  # trigger analysis (non-blocking)
     app.after(schedule_interval * 1000, run_scheduled_analysis)
 
@@ -302,93 +317,177 @@ def analyze_selected():
         return
     start, end = get_time_range()
     if not start or not end:
-        return
+        logging.info("Time range selection cancelled by user.")
+        return # User cancelled time range selection
     # Collect URLs from selected dashboards.
     selected_urls = [d["url"] for d in session["dashboards"] if d["name"] in selected_names]
     progress_bar['maximum'] = len(selected_urls)
     progress_bar['value'] = 0
+    logging.info(f"Starting analysis for {len(selected_urls)} dashboards from {start} to {end}")
     Thread(target=lambda: asyncio.run(analyze_dashboards(selected_urls, start, end)),
            daemon=True).start()
 
-async def analyze_dashboards(urls, start, end):
-    results = []
-    completed = 0
-    tasks = [visit_dashboard(url, start, end) for url in urls]
-    for task in asyncio.as_completed(tasks):
-        result = await task
-        results.append(result)
-        completed += 1
-        app.after(0, lambda c=completed: progress_bar.config(value=c))
-    app.after(0, lambda: show_results(results, start, end))
+# --- NEW: Intelligent Splunk Dashboard Waiting Function ---
+async def _wait_for_splunk_dashboard_to_load(page: Page, timeout_ms: int = SPLUNK_WAIT_TIMEOUT_MS):
+    """
+    Intelligently waits for Splunk dashboard panels to load their content.
+    This includes:
+    1. Waiting for the main dashboard content area to be present.
+    2. Waiting for all 'dashboard-panel' elements to appear.
+    3. Iteratively checking if panels have non-zero height and don't contain
+       common loading/waiting indicators.
+    """
+    logging.info(f"Waiting for dashboard elements to load (timeout: {timeout_ms / 1000}s)...")
+    
+    # Wait for the main dashboard content container.
+    # This might be 'div.dashboard-body', 'div.dashboard-view', or similar.
+    # Adjust selector based on your Splunk version if needed.
+    await page.wait_for_selector("div.dashboard-body, div.dashboard-view", timeout=timeout_ms)
+    
+    # Wait for at least one dashboard panel to be visible.
+    await page.wait_for_selector("div.dashboard-panel", state="visible", timeout=timeout_ms)
+
+    # Use a loop with `wait_for_function` and `page.evaluate` for more robust checks.
+    # This loop ensures we check for panels to be visible AND their content loaded.
+    
+    # Common Splunk loading indicators we want to avoid:
+    loading_indicators = [
+        "Waiting for input",
+        "No results found", # Sometimes this is a valid state, but often indicates a non-loaded search
+        "Loading...",
+        "Waiting for data...",
+        "Generating data...",
+        "No results for this time range.", # Could also be valid, but worth considering
+        "Could not retrieve search results.", # Error indicator
+        "Search is waiting for inputs." # Another input related indicator
+    ]
+    
+    # Loop and check panel states
+    start_time = datetime.now()
+    while (datetime.now() - start_time).total_seconds() * 1000 < timeout_ms:
+        panels_state = await page.evaluate(f"""(loadingIndicators) => {{
+            const panels = document.querySelectorAll("div.dashboard-panel");
+            if (panels.length === 0) return {{ allLoaded: false, reason: 'no_panels' }};
+
+            let allPanelsRendered = true;
+            let allPanelsLoaded = true;
+            let panelsWithLoadingText = [];
+
+            panels.forEach(panel => {{
+                // Check if panel is visible and has some height
+                if (panel.offsetHeight === 0 || panel.offsetWidth === 0) {{
+                    allPanelsRendered = false;
+                }}
+
+                // Check for loading/waiting text within the panel
+                const panelText = panel.innerText;
+                const isLoading = loadingIndicators.some(indicator => panelText.includes(indicator));
+                if (isLoading) {{
+                    allPanelsLoaded = false;
+                    panelsWithLoadingText.push(panelText.substring(0, 50) + "..."); // log a snippet
+                }}
+            }});
+
+            if (allPanelsRendered && allPanelsLoaded) {{
+                return {{ allLoaded: true }};
+            }} else if (!allPanelsRendered) {{
+                return {{ allLoaded: false, reason: 'not_rendered' }};
+            }} else {{ // !allPanelsLoaded
+                return {{ allLoaded: false, reason: 'loading_text_present', panelsWithLoadingText: panelsWithLoadingText }};
+            }}
+        }}""", loading_indicators)
+
+        if panels_state["allLoaded"]:
+            logging.info("All Splunk dashboard panels appear to be loaded.")
+            await asyncio.sleep(1) # Give a small buffer for any final rendering
+            return True
+        else:
+            reason = panels_state.get('reason', 'unknown')
+            log_msg = f"Dashboard not fully loaded yet. Reason: {reason}"
+            if 'panelsWithLoadingText' in panels_state and panels_state['panelsWithLoadingText']:
+                log_msg += f". Panels with loading text: {panels_state['panelsWithLoadingText']}"
+            logging.debug(log_msg) # Use debug for frequent checks
+
+        await asyncio.sleep(2) # Wait 2 seconds before checking again
+
+    raise TimeoutError(f"Splunk dashboard panels did not load within {timeout_ms / 1000} seconds.")
+
 
 async def visit_dashboard(url, start, end):
     """
-    Visits the dashboard and waits until the dashboard panels
-    (assumed to be <div class="dashboard-panel"> elements) are loaded.
-    In particular, the function waits until each panel has a nonzero height
-    and its content no longer includes “Waiting for input”.
+    Visits the dashboard, handles login if necessary, and waits until the dashboard panels
+    are loaded using the intelligent waiting logic.
     """
     retries = 3
     for attempt in range(1, retries + 1):
         try:
-            playwright = await async_playwright().start()
-            try:
-                browser = await p.chromium.launch(headless=False,executable_path="C:\Program Files\Google\Chrome\Application\chrome.exe")
+            async with async_playwright() as p:
+                # Specify executable_path only if you have a non-default Chrome location
+                # On Windows, it often finds it automatically.
+                # If you need a specific version, then: executable_path="C:\Program Files\Google\Chrome\Application\chrome.exe"
+                browser = await p.chromium.launch(headless=True) # Set headless=False for debugging
                 try:
                     context = await browser.new_context()
-                    try:
-                        page = await context.new_page()
-                        await page.goto(url, wait_until="networkidle")
-                        
-                        # Wait for panels to appear.
-                        #await page.wait_for_selector("div.dashboard-panel", timeout=30000)
-                        await self._wait_for_dashboard_load_async(page, wait_timeout)
-                        # Wait until each panel is rendered (nonzero height) and does NOT include "Waiting for input"
-                        await page.wait_for_function(
-                            """() => {
-                                const panels = document.querySelectorAll("div.dashboard-panel");
-                                return Array.from(panels).every(panel => 
-                                    panel.offsetHeight > 0 && !panel.innerText.includes("Waiting for input"));
-                            }""",
-                            timeout=30000
-                        )
+                    page = await context.new_page()
+                    logging.info(f"Navigating to {url} (Attempt {attempt}/{retries})")
+                    await page.goto(url, wait_until="load", timeout=SPLUNK_WAIT_TIMEOUT_MS) # Use 'load' initially for faster page load
 
-                        # In case a login is required.
-                        if await page.query_selector('input[placeholder="Username"]'):
-                            if not session["username"] or not session["password"]:
-                                raise RuntimeError("Login required but credentials not set.")
-                            await page.fill('input[placeholder="Username"]', session["username"])
-                            await page.fill('input[placeholder="Password"]', session["password"])
-                            await page.press('input[placeholder="Password"]', "Enter")
-                            await page.wait_for_load_state("networkidle")
-                            # Wait again for panels to load after login.
-                            await page.wait_for_selector("div.dashboard-panel", timeout=30000)
-                            await page.wait_for_function(
-                                """() => {
-                                    const panels = document.querySelectorAll("div.dashboard-panel");
-                                    return Array.from(panels).every(panel => 
-                                        panel.offsetHeight > 0 && !panel.innerText.includes("Waiting for input"));
-                                }""",
-                                timeout=30000
-                            )
-                        
-                        safe = sanitize_filename(url)
-                        # Use EST time for the screenshot stamp.
-                        stamp = datetime.now(est).strftime("%Y%m%d_%H%M%S")
-                        screenshot_path = os.path.join(SCREENSHOT_DIR, f"screenshot_{safe}_{stamp}.png")
-                        await page.screenshot(path=screenshot_path, full_page=True)
-                        return f"✅ {url} ({start} to {end}): Screenshot -> {screenshot_path}"
-                    finally:
-                        await context.close()
+                    # Check for login page first
+                    if await page.query_selector('input[placeholder="Username"]'):
+                        logging.info("Splunk login page detected.")
+                        if not session["username"] or not session["password"]:
+                            raise RuntimeError("Login required but credentials not set. Please set them in settings.")
+                        await page.fill('input[placeholder="Username"]', session["username"])
+                        await page.fill('input[placeholder="Password"]', session["password"])
+                        await page.press('input[placeholder="Password"]', "Enter")
+                        logging.info("Attempted login, waiting for navigation...")
+                        # Wait for navigation after login, then apply intelligent wait
+                        await page.wait_for_url(url, wait_until="domcontentloaded", timeout=SPLUNK_WAIT_TIMEOUT_MS) # Wait for original URL
+
+                        # Give it a moment for elements to appear after navigation, then intelligent wait
+                        await asyncio.sleep(2) # Small pause
+                        await _wait_for_splunk_dashboard_to_load(page, SPLUNK_WAIT_TIMEOUT_MS)
+                        logging.info("Splunk dashboard loaded after login.")
+
+                    else:
+                        logging.info("No login page detected, proceeding with dashboard load wait.")
+                        # Directly apply intelligent wait if no login was needed
+                        await _wait_for_splunk_dashboard_to_load(page, SPLUNK_WAIT_TIMEOUT_MS)
+
+                    safe_filename = sanitize_filename(url)
+                    # Use EST time for the screenshot stamp.
+                    stamp = datetime.now(est).strftime("%Y%m%d_%H%M%S")
+                    screenshot_path = os.path.join(SCREENSHOT_DIR, f"screenshot_{safe_filename}_{stamp}.png")
+                    
+                    logging.info(f"Taking screenshot of {url} at {screenshot_path}")
+                    await page.screenshot(path=screenshot_path, full_page=True)
+                    return f"✅ {url} ({start} to {end}): Screenshot -> {screenshot_path}"
+
+                except Exception as e:
+                    logging.error(f"Error during page operations for {url} (Attempt {attempt}/{retries}): {e}")
+                    # Capture a screenshot on error for debugging
+                    error_screenshot_path = os.path.join(SCREENSHOT_DIR, f"error_screenshot_{sanitize_filename(url)}_{stamp}_attempt{attempt}.png")
+                    try:
+                        await page.screenshot(path=error_screenshot_path)
+                        logging.error(f"Error screenshot saved to {error_screenshot_path}")
+                    except Exception as se:
+                        logging.error(f"Failed to capture error screenshot: {se}")
+                    
+                    if attempt == retries:
+                        return f"❌ {url}: Failed after {retries} attempts. Last error: {e}"
+                    logging.info(f"Retrying {url} in 2 seconds...")
+                    await asyncio.sleep(2) # Wait before retrying
                 finally:
-                    await browser.close()
-            finally:
-                await playwright.stop()
-        except Exception as e:
-            logging.error(f"Attempt {attempt} failed for {url}: {e}")
+                    if 'browser' in locals() and browser.is_connected():
+                        await browser.close()
+                    logging.info(f"Browser closed for {url}")
+        except Exception as e: # Catch errors during playwright launch or general setup
+            logging.error(f"Playwright launch or setup failed for {url} (Attempt {attempt}/{retries}): {e}")
             if attempt == retries:
-                return f"❌ {url}: {e}"
+                return f"❌ {url}: Playwright setup failed after {retries} attempts. Last error: {e}"
+            logging.info(f"Retrying {url} in 2 seconds...")
             await asyncio.sleep(2)
+
 
 def show_results(messages, start, end):
     win = tk.Toplevel(app)
@@ -408,12 +507,15 @@ def show_results(messages, start, end):
                 f.write(f"<p>Time Range: {start} to {end}</p>")
                 f.write("<ul>")
                 for msg in messages:
-                    f.write(f"<li>{msg}</li>")
+                    # Basic HTML escaping for messages
+                    escaped_msg = msg.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    f.write(f"<li>{escaped_msg}</li>")
                 f.write("</ul></body></html>")
             messagebox.showinfo("Report Exported", f"Report saved as {report_filename}")
             logging.info("Report exported to %s", report_filename)
         except Exception as e:
             messagebox.showerror("Export Error", f"Failed to export report: {e}")
+            logging.error(f"Failed to export report to {report_filename}: {e}")
 
     tk.Button(win, text="Export Report to HTML", command=export_report).pack(pady=10)
 
