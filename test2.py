@@ -80,8 +80,8 @@ async def take_screenshot(name, url, username, password, output_dir="screenshots
         try:
             await page.goto(url, timeout=30000)
             if await page.query_selector('input[name="username"]'):
-                await page.fill('input[name="username"]', username)
-                await page.fill('input[name="password"]', password)
+                await page.fill('input[name="username"]', value=username)
+                await page.fill('input[name="password"]', value=password)
                 await page.click('button[type="submit"]')
                 await page.wait_for_load_state("networkidle")
 
