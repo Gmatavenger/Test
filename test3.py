@@ -324,21 +324,25 @@ async def analyze_dashboards(urls, start, end):
 
 async def visit_dashboard(url, start, end):
     """
-    This function now waits for a Splunk dashboard (assumed to render its panels inside
-    <div class="dashboard-panel"> elements) to load. It waits until at least one such element 
-    is present and has nonzero height before taking a screenshot.
+    Visit the dashboard URL while waiting for all individual panels (assumed to be 
+    rendered as <div class="dashboard-panel"> elements) to fully load. This version 
+    removes the use of "async with" on coroutine objects; instead we explicitly await
+    Playwright's start and stop methods.
     """
     retries = 3
     for attempt in range(1, retries + 1):
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
+            # Start Playwright explicitly.
+            playwright = await async_playwright().start()
+            try:
+                browser = await playwright.chromium.launch(headless=True)
                 try:
-                    async with browser.new_context() as context:
+                    context = await browser.new_context()
+                    try:
                         page = await context.new_page()
                         await page.goto(url, wait_until="networkidle")
                         
-                        # Wait for Splunk dashboard panels to load.
+                        # Wait for Splunk dashboard panels to appear and render.
                         await page.wait_for_selector("div.dashboard-panel", timeout=15000)
                         await page.wait_for_function(
                             'Array.from(document.querySelectorAll("div.dashboard-panel")).every(panel => panel.offsetHeight > 0)',
@@ -353,24 +357,30 @@ async def visit_dashboard(url, start, end):
                             await page.fill('input[placeholder="Password"]', session["password"])
                             await page.press('input[placeholder="Password"]', "Enter")
                             await page.wait_for_load_state("networkidle")
-                            # Wait again for panels in case dashboard re-loads.
+                            # Wait again for panels in case dashboard is reloaded after login.
                             await page.wait_for_selector("div.dashboard-panel", timeout=15000)
                             await page.wait_for_function(
                                 'Array.from(document.querySelectorAll("div.dashboard-panel")).every(panel => panel.offsetHeight > 0)',
                                 timeout=15000
                             )
+                        
                         safe = sanitize_filename(url)
                         stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
                         screenshot_path = os.path.join(SCREENSHOT_DIR, f"screenshot_{safe}_{stamp}.png")
                         await page.screenshot(path=screenshot_path, full_page=True)
                         return f"✅ {url} ({start} to {end}): Screenshot -> {screenshot_path}"
+                    finally:
+                        await context.close()
                 finally:
                     await browser.close()
+            finally:
+                await playwright.stop()
         except Exception as e:
             logging.error(f"Attempt {attempt} failed for {url}: {e}")
             if attempt == retries:
                 return f"❌ {url}: {e}"
             await asyncio.sleep(2)
+
 
 def show_results(messages, start, end):
     win = tk.Toplevel(app)
