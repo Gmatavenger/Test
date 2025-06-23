@@ -1,6 +1,7 @@
 import requests
 import asyncio
 import os
+import json
 from playwright.async_api import async_playwright
 from datetime import datetime
 from dotenv import load_dotenv
@@ -13,31 +14,62 @@ SPLUNK_HOST = os.getenv("SPLUNK_HOST")
 SPLUNK_APP = os.getenv("SPLUNK_APP", "search")
 USERNAME = os.getenv("SPLUNK_USERNAME")
 PASSWORD = os.getenv("SPLUNK_PASSWORD")
-DASHBOARD_NAME = os.getenv("DASHBOARD_NAME")
 
-# Disable SSL warnings (optional for dev)
-requests.packages.urllib3.disable_warnings()
+# --- Dashboard Storage ---
+DASHBOARD_STORE = "dashboards.json"
 
-# --- Get Dashboard URL from Splunk REST API ---
-def get_dashboard_url(dashboard_name, username, password):
-    api_url = f"{SPLUNK_HOST}/servicesNS/{username}/{SPLUNK_APP}/data/ui/views/{dashboard_name}?output_mode=json"
+def load_dashboards():
+    if os.path.exists(DASHBOARD_STORE):
+        with open(DASHBOARD_STORE, "r") as f:
+            return json.load(f)
+    return []
+
+def save_dashboards(dashboards):
+    with open(DASHBOARD_STORE, "w") as f:
+        json.dump(dashboards, f, indent=2)
+
+def add_dashboard():
+    name = input("Enter dashboard name: ").strip()
+    url = input("Enter dashboard URL: ").strip()
+    if not name or not url:
+        print("❌ Both name and URL are required.")
+        return
+    dashboards = load_dashboards()
+    if any(d["name"] == name for d in dashboards):
+        print("❌ Dashboard with that name already exists.")
+        return
+    dashboards.append({"name": name, "url": url})
+    save_dashboards(dashboards)
+    print(f"✅ Added dashboard '{name}'")
+
+def delete_dashboard():
+    dashboards = load_dashboards()
+    if not dashboards:
+        print("No dashboards to delete.")
+        return
+    print("Available Dashboards:")
+    for i, dash in enumerate(dashboards):
+        print(f"{i + 1}. {dash['name']} - {dash['url']}")
     try:
-        response = requests.get(api_url, auth=(username, password), verify=False)
-        response.raise_for_status()
-        data = response.json()
-        if data.get("entry"):
-            return f"{SPLUNK_HOST}/en-US/app/{SPLUNK_APP}/{dashboard_name}"
+        idx = int(input("Enter the number of the dashboard to delete: ")) - 1
+        if 0 <= idx < len(dashboards):
+            confirm = input(f"Are you sure you want to delete '{dashboards[idx]['name']}'? (y/n): ")
+            if confirm.lower() == 'y':
+                removed = dashboards.pop(idx)
+                save_dashboards(dashboards)
+                print(f"✅ Deleted dashboard '{removed['name']}'")
+            else:
+                print("Cancelled deletion.")
         else:
-            raise Exception("Dashboard not found.")
-    except Exception as e:
-        print(f"Error fetching dashboard URL: {e}")
-        return None
+            print("❌ Invalid index.")
+    except ValueError:
+        print("❌ Invalid input.")
 
 # --- Use Playwright to Login & Screenshot ---
-async def take_screenshot(url, username, password, output_dir="screenshots"):
+async def take_screenshot(name, url, username, password, output_dir="screenshots"):
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    filename = f"screenshot_{DASHBOARD_NAME}_{timestamp}.png"
+    filename = f"screenshot_{name}_{timestamp}.png"
     path = os.path.join(output_dir, filename)
 
     async with async_playwright() as p:
@@ -53,7 +85,7 @@ async def take_screenshot(url, username, password, output_dir="screenshots"):
                 await page.click('button[type="submit"]')
                 await page.wait_for_load_state("networkidle")
 
-            await page.wait_for_timeout(3000)  # allow rendering
+            await page.wait_for_timeout(3000)
             await page.screenshot(path=path, full_page=True)
             print(f"✅ Screenshot saved to {path}")
 
@@ -63,10 +95,41 @@ async def take_screenshot(url, username, password, output_dir="screenshots"):
             await browser.close()
 
 # --- Main ---
+def main():
+    while True:
+        print("\n--- Splunk Dashboard Screenshot Tool ---")
+        print("1. Add Dashboard")
+        print("2. Delete Dashboard")
+        print("3. Capture Dashboard Screenshot")
+        print("4. Exit")
+        choice = input("Choose an option: ")
+
+        if choice == "1":
+            add_dashboard()
+        elif choice == "2":
+            delete_dashboard()
+        elif choice == "3":
+            dashboards = load_dashboards()
+            if not dashboards:
+                print("No dashboards available.")
+                continue
+            print("Available Dashboards:")
+            for i, dash in enumerate(dashboards):
+                print(f"{i + 1}. {dash['name']}")
+            try:
+                idx = int(input("Select a dashboard to capture: ")) - 1
+                if 0 <= idx < len(dashboards):
+                    dash = dashboards[idx]
+                    asyncio.run(take_screenshot(dash['name'], dash['url'], USERNAME, PASSWORD))
+                else:
+                    print("❌ Invalid selection.")
+            except ValueError:
+                print("❌ Invalid input.")
+        elif choice == "4":
+            print("Goodbye!")
+            break
+        else:
+            print("❌ Invalid choice. Try again.")
+
 if __name__ == "__main__":
-    dashboard_url = get_dashboard_url(DASHBOARD_NAME, USERNAME, PASSWORD)
-    if dashboard_url:
-        print(f"Dashboard URL: {dashboard_url}")
-        asyncio.run(take_screenshot(dashboard_url, USERNAME, PASSWORD))
-    else:
-        print("❌ Could not get dashboard URL.")
+    main()
