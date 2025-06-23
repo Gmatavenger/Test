@@ -6,7 +6,7 @@ import uuid
 import asyncio
 import signal
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from threading import Thread
 
@@ -16,6 +16,7 @@ from tkcalendar import DateEntry
 
 from playwright.async_api import async_playwright
 from dotenv import load_dotenv
+import pytz
 
 # ------------------------------------------------------------------------------
 # Logging Setup
@@ -56,7 +57,10 @@ session = {
 }
 
 DASHBOARD_FILE = "dashboards.json"
-SCREENSHOT_DIR = os.path.join("screenshots", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+
+# Use EST for folder naming and timestamps.
+est = pytz.timezone("America/New_York")
+SCREENSHOT_DIR = os.path.join("screenshots", datetime.now(est).strftime("%Y-%m-%d"))
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
 # For scheduled runs
@@ -156,79 +160,77 @@ def update_group_filter():
     group_filter.set("All")
 
 # ------------------------------------------------------------------------------
-# Advanced Time Range Selection
+# Advanced Time Range Selection Using EST and Dropdown Options
 # ------------------------------------------------------------------------------
 def get_time_range():
     """
-    Displays a pop-up to choose the time range. Two modes are available:
-     - Absolute: Uses DateEntry and time inputs (HH:MM)
-     - Relative (Splunk Format): e.g., earliest "-24h@h" and latest "now"
+    Displays a pop-up to choose the time range in EST.
+    Users can choose from several relative options or select "Custom Absolute".
     """
     popup = tk.Toplevel(app)
     result = {}
-    popup.title("Choose Time Range")
+    popup.title("Select Time Range (EST)")
     
-    # Mode selection: Absolute vs. Relative
-    mode_var = tk.StringVar(value="Absolute")
-    tk.Label(popup, text="Select Time Range Mode:").grid(row=0, column=0, columnspan=2, pady=(5,2))
-    tk.Radiobutton(popup, text="Absolute", variable=mode_var, value="Absolute").grid(row=1, column=0, sticky='w', padx=5)
-    tk.Radiobutton(popup, text="Relative (Splunk Format)", variable=mode_var, value="Relative").grid(row=1, column=1, sticky='w', padx=5)
+    # Dropdown options for relative time selection in EST.
+    options = [
+        "Last 1 Hour (EST)",
+        "Last 4 Hours (EST)",
+        "Today (EST)",
+        "Yesterday (EST)",
+        "Last 7 Days (EST)",
+        "Custom Absolute"
+    ]
+    tk.Label(popup, text="Select Time Range:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+    time_option = ttk.Combobox(popup, values=options, state="readonly")
+    time_option.current(0)
+    time_option.grid(row=0, column=1, padx=5, pady=5)
     
-    # --- Absolute Mode Frame ---
+    # Frame for custom absolute selection (hidden by default).
     abs_frame = tk.Frame(popup)
-    abs_frame.grid(row=2, column=0, columnspan=2, sticky='ew', padx=5, pady=5)
-    
-    tk.Label(abs_frame, text="Start Date:").grid(row=0, column=0, sticky='w')
+    abs_frame.grid(row=1, column=0, columnspan=2, padx=5, pady=5)
+    tk.Label(abs_frame, text="Start Date:").grid(row=0, column=0, sticky="w")
     start_date = DateEntry(abs_frame)
     start_date.grid(row=0, column=1, pady=2)
-    
-    tk.Label(abs_frame, text="Start Time (HH:MM):").grid(row=1, column=0, sticky='w')
+    tk.Label(abs_frame, text="Start Time (HH:MM):").grid(row=1, column=0, sticky="w")
     start_time = tk.Entry(abs_frame)
     start_time.grid(row=1, column=1, pady=2)
-    
-    tk.Label(abs_frame, text="End Date:").grid(row=2, column=0, sticky='w')
+    tk.Label(abs_frame, text="End Date:").grid(row=2, column=0, sticky="w")
     end_date = DateEntry(abs_frame)
     end_date.grid(row=2, column=1, pady=2)
-    
-    tk.Label(abs_frame, text="End Time (HH:MM):").grid(row=3, column=0, sticky='w')
+    tk.Label(abs_frame, text="End Time (HH:MM):").grid(row=3, column=0, sticky="w")
     end_time = tk.Entry(abs_frame)
     end_time.grid(row=3, column=1, pady=2)
+    abs_frame.grid_remove()
     
-    # --- Relative Mode Frame ---
-    rel_frame = tk.Frame(popup)
-    rel_frame.grid(row=3, column=0, columnspan=2, sticky='ew', padx=5, pady=5)
-    
-    tk.Label(rel_frame, text="Earliest (e.g., -24h@h or -1h):").grid(row=0, column=0, sticky='w')
-    earliest_entry = tk.Entry(rel_frame)
-    earliest_entry.insert(0, "-24h@h")
-    earliest_entry.grid(row=0, column=1, pady=2)
-    
-    tk.Label(rel_frame, text="Latest (typically 'now'):").grid(row=1, column=0, sticky='w')
-    latest_entry = tk.Entry(rel_frame)
-    latest_entry.insert(0, "now")
-    latest_entry.grid(row=1, column=1, pady=2)
-    
-    # Initially, disable the relative controls
-    for child in rel_frame.winfo_children():
-        child.configure(state="disabled")
-    
-    def update_mode(*args):
-        if mode_var.get() == "Absolute":
-            for child in abs_frame.winfo_children():
-                child.configure(state="normal")
-            for child in rel_frame.winfo_children():
-                child.configure(state="disabled")
+    def toggle_abs_frame(event):
+        if time_option.get() == "Custom Absolute":
+            abs_frame.grid()
         else:
-            for child in abs_frame.winfo_children():
-                child.configure(state="disabled")
-            for child in rel_frame.winfo_children():
-                child.configure(state="normal")
+            abs_frame.grid_remove()
     
-    mode_var.trace("w", update_mode)
+    time_option.bind("<<ComboboxSelected>>", toggle_abs_frame)
     
     def submit():
         try:
-            if mode_var.get() == "Absolute":
+            now_est = datetime.now(est)
+            selection = time_option.get()
+            if selection == "Last 1 Hour (EST)":
+                start = (now_est - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
+                end = now_est.strftime("%Y-%m-%d %H:%M")
+            elif selection == "Last 4 Hours (EST)":
+                start = (now_est - timedelta(hours=4)).strftime("%Y-%m-%d %H:%M")
+                end = now_est.strftime("%Y-%m-%d %H:%M")
+            elif selection == "Today (EST)":
+                start = now_est.replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
+                end = now_est.strftime("%Y-%m-%d %H:%M")
+            elif selection == "Yesterday (EST)":
+                yesterday = now_est - timedelta(days=1)
+                start = yesterday.replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
+                end = yesterday.replace(hour=23, minute=59, second=59, microsecond=0).strftime("%Y-%m-%d %H:%M")
+            elif selection == "Last 7 Days (EST)":
+                start = (now_est - timedelta(days=7)).strftime("%Y-%m-%d %H:%M")
+                end = now_est.strftime("%Y-%m-%d %H:%M")
+            elif selection == "Custom Absolute":
                 s_time = start_time.get().strip()
                 e_time = end_time.get().strip()
                 if not re.match(r"^\d{2}:\d{2}$", s_time) or not re.match(r"^\d{2}:\d{2}$", e_time):
@@ -239,20 +241,17 @@ def get_time_range():
                 end_dt = datetime.strptime(end_str, "%Y-%m-%d %H:%M")
                 if end_dt <= start_dt:
                     raise ValueError("End time must be after start time.")
-                result["start"] = start_str
-                result["end"] = end_str
+                start = start_str
+                end = end_str
             else:
-                earliest = earliest_entry.get().strip()
-                latest = latest_entry.get().strip()
-                if not earliest or not latest:
-                    raise ValueError("Both earliest and latest must be provided.")
-                result["start"] = earliest
-                result["end"] = latest
+                raise ValueError("Invalid selection")
+            result["start"] = start
+            result["end"] = end
             popup.destroy()
         except Exception as e:
             messagebox.showerror("Input Error", str(e))
     
-    tk.Button(popup, text="Submit", command=submit).grid(row=4, column=0, columnspan=2, pady=10)
+    tk.Button(popup, text="Submit", command=submit).grid(row=2, column=0, columnspan=2, pady=10)
     popup.grab_set()
     popup.wait_window()
     return result.get("start"), result.get("end")
@@ -324,15 +323,14 @@ async def analyze_dashboards(urls, start, end):
 
 async def visit_dashboard(url, start, end):
     """
-    Visit the dashboard URL while waiting for all individual panels (assumed to be 
-    rendered as <div class="dashboard-panel"> elements) to fully load. This version 
-    removes the use of "async with" on coroutine objects; instead we explicitly await
-    Playwright's start and stop methods.
+    Visits the dashboard and waits until the dashboard panels
+    (assumed to be <div class="dashboard-panel"> elements) are loaded.
+    In particular, the function waits until each panel has a nonzero height
+    and its content no longer includes “Waiting for input”.
     """
     retries = 3
     for attempt in range(1, retries + 1):
         try:
-            # Start Playwright explicitly.
             playwright = await async_playwright().start()
             try:
                 browser = await playwright.chromium.launch(headless=True)
@@ -342,14 +340,19 @@ async def visit_dashboard(url, start, end):
                         page = await context.new_page()
                         await page.goto(url, wait_until="networkidle")
                         
-                        # Wait for Splunk dashboard panels to appear and render.
-                        await page.wait_for_selector("div.dashboard-panel", timeout=15000)
+                        # Wait for panels to appear.
+                        await page.wait_for_selector("div.dashboard-panel", timeout=30000)
+                        # Wait until each panel is rendered (nonzero height) and does NOT include "Waiting for input"
                         await page.wait_for_function(
-                            'Array.from(document.querySelectorAll("div.dashboard-panel")).every(panel => panel.offsetHeight > 0)',
-                            timeout=15000
+                            """() => {
+                                const panels = document.querySelectorAll("div.dashboard-panel");
+                                return Array.from(panels).every(panel => 
+                                    panel.offsetHeight > 0 && !panel.innerText.includes("Waiting for input"));
+                            }""",
+                            timeout=30000
                         )
-                        
-                        # Handle login if present.
+
+                        # In case a login is required.
                         if await page.query_selector('input[placeholder="Username"]'):
                             if not session["username"] or not session["password"]:
                                 raise RuntimeError("Login required but credentials not set.")
@@ -357,15 +360,20 @@ async def visit_dashboard(url, start, end):
                             await page.fill('input[placeholder="Password"]', session["password"])
                             await page.press('input[placeholder="Password"]', "Enter")
                             await page.wait_for_load_state("networkidle")
-                            # Wait again for panels in case dashboard is reloaded after login.
-                            await page.wait_for_selector("div.dashboard-panel", timeout=15000)
+                            # Wait again for panels to load after login.
+                            await page.wait_for_selector("div.dashboard-panel", timeout=30000)
                             await page.wait_for_function(
-                                'Array.from(document.querySelectorAll("div.dashboard-panel")).every(panel => panel.offsetHeight > 0)',
-                                timeout=15000
+                                """() => {
+                                    const panels = document.querySelectorAll("div.dashboard-panel");
+                                    return Array.from(panels).every(panel => 
+                                        panel.offsetHeight > 0 && !panel.innerText.includes("Waiting for input"));
+                                }""",
+                                timeout=30000
                             )
                         
                         safe = sanitize_filename(url)
-                        stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                        # Use EST time for the screenshot stamp.
+                        stamp = datetime.now(est).strftime("%Y%m%d_%H%M%S")
                         screenshot_path = os.path.join(SCREENSHOT_DIR, f"screenshot_{safe}_{stamp}.png")
                         await page.screenshot(path=screenshot_path, full_page=True)
                         return f"✅ {url} ({start} to {end}): Screenshot -> {screenshot_path}"
@@ -381,7 +389,6 @@ async def visit_dashboard(url, start, end):
                 return f"❌ {url}: {e}"
             await asyncio.sleep(2)
 
-
 def show_results(messages, start, end):
     win = tk.Toplevel(app)
     win.title("Analysis Summary")
@@ -392,7 +399,7 @@ def show_results(messages, start, end):
     out.config(state=tk.DISABLED)
 
     def export_report():
-        report_filename = f"report_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.html"
+        report_filename = f"report_{datetime.now(est).strftime('%Y%m%d_%H%M%S')}.html"
         try:
             with open(report_filename, "w") as f:
                 f.write("<html><head><title>Dashboard Analysis Report</title></head><body>")
@@ -416,14 +423,14 @@ app = tk.Tk()
 app.title("Splunk Dashboard Desktop Client")
 app.geometry("800x600")
 
-# Menu for settings.
+# Menu for Settings.
 menu_bar = tk.Menu(app)
 settings_menu = tk.Menu(menu_bar, tearoff=0)
 settings_menu.add_command(label="Manage Credentials", command=manage_credentials)
 menu_bar.add_cascade(label="Settings", menu=settings_menu)
 app.config(menu=menu_bar)
 
-# Control frame (buttons and group filter)
+# Control frame (buttons and group filter).
 control_frame = tk.Frame(app)
 control_frame.pack(pady=10)
 
