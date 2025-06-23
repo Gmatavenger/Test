@@ -1,3 +1,12 @@
+# --- Constants ---
+SECRETS_FILE = ".secrets"
+# ... (other constants remain the same) ...
+
+# --- NEW: CSS Selectors for Splunk Panels ---
+# The selector for an individual dashboard panel container
+PANEL_SELECTOR = "div.dashboard-panel"
+# The selector for the loading indicator *within* a panel
+PANEL_LOADING_INDICATOR_SELECTOR = ".panel-load-progress"
 import os
 import sys
 import re
@@ -83,7 +92,6 @@ class SplunkAutomator:
     async def _login_if_required(self, page: Page):
         """Logs into Splunk if the login form is present."""
         try:
-            # Use a short timeout to quickly check for the login form
             username_input = await page.wait_for_selector(USERNAME_SELECTOR, timeout=3000)
             if username_input:
                 logging.info(f"Login page detected for {page.url}.")
@@ -94,12 +102,49 @@ class SplunkAutomator:
                 await page.press(PASSWORD_SELECTOR, "Enter")
                 await page.wait_for_load_state("networkidle", timeout=60000)
                 logging.info("Login successful.")
-        except (asyncio.TimeoutError, ValueError):
-            # This is not an error, it just means we're likely already logged in.
+        except asyncio.TimeoutError:
             logging.info("No login form detected or already logged in.")
         except Exception as e:
             logging.error(f"An unexpected error occurred during login attempt: {e}")
-            raise # Re-raise the exception to be caught by the calling function
+            raise
+
+    async def _wait_for_panels_to_load(self, page: Page):
+        """
+        NEW: Waits for all dashboard panels to finish loading their data.
+        This is the core of the fix.
+        """
+        logging.info("Waiting for all dashboard panels to finish loading...")
+        
+        # This JavaScript function is executed in the browser.
+        # It returns true only when no panels have a loading indicator.
+        js_condition = f"""
+        () => {{
+            const panels = document.querySelectorAll('{PANEL_SELECTOR}');
+            if (panels.length === 0) {{
+                // If there are no panels yet, we are not ready.
+                return false;
+            }}
+            // Check every panel for a loading indicator.
+            for (const panel of panels) {{
+                if (panel.querySelector('{PANEL_LOADING_INDICATOR_SELECTOR}')) {{
+                    // If we find even one loading indicator, we are not done.
+                    return false;
+                }}
+            }}
+            // If we looped through all panels and found no loaders, we are done.
+            return true;
+        }}
+        """
+        try:
+            # Wait up to 5 minutes for the condition to be true.
+            await page.wait_for_function(js_condition, timeout=300000) 
+            logging.info("All panels have loaded.")
+        except asyncio.TimeoutError:
+            logging.warning(f"Timeout exceeded while waiting for panels to load on {page.url}. Some panels may not have loaded.")
+            # We proceed anyway to capture a screenshot of the current state.
+        except Exception as e:
+            logging.error(f"An error occurred while waiting for panels: {e}")
+
 
     async def visit_dashboard(self, browser: Browser, url: str, time_range: Tuple[str, str]) -> str:
         """Navigates to a single dashboard, logs in, and takes a screenshot."""
@@ -109,15 +154,20 @@ class SplunkAutomator:
             context = await browser.new_context()
             page = await context.new_page()
             
-            # Construct URL with time range if applicable (modify this as per your dashboard's URL structure)
-            # This is an example for Splunk: &earliest=...&latest=...
+            # Set a larger default timeout for navigation and other actions
+            page.set_default_timeout(90000)
+
             timed_url = f"{url}?earliest={start_str}&latest={end_str}"
             
-            await page.goto(timed_url, wait_until="networkidle", timeout=90000)
+            await page.goto(timed_url, wait_until="domcontentloaded")
             await self._login_if_required(page)
 
-            # Wait for dashboard to render after potential login and redirects
-            await page.wait_for_timeout(5000)
+            # --- MODIFIED PART ---
+            # Instead of a simple timeout, call our new intelligent wait function.
+            await self._wait_for_panels_to_load(page)
+            # Add a small final delay for any last-second rendering.
+            await page.wait_for_timeout(2000)
+            # --- END MODIFICATION ---
 
             safe_name = sanitize_filename(url)
             timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -136,11 +186,11 @@ class SplunkAutomator:
     async def run_analysis(self, urls: List[str], time_range: Tuple[str, str], progress_callback) -> List[str]:
         """
         Orchestrates the analysis of multiple dashboards.
-        FIX: Launches one browser for all tasks for efficiency.
+        (This method does not need to be changed.)
         """
         results = []
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True,executable_path="C:\Program Files\Google\Chrome\Application\chrome.exe")
+            browser = await p.chromium.launch(headless=True)
             try:
                 for i, url in enumerate(urls):
                     result = await self.visit_dashboard(browser, url, time_range)
