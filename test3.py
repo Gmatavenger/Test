@@ -68,7 +68,7 @@ scheduled = False
 schedule_interval = 0  # in seconds
 
 # Define a default wait timeout for Splunk operations
-SPLUNK_WAIT_TIMEOUT_MS = 60000 # 60 seconds
+SPLUNK_WAIT_TIMEOUT_MS = 90000 # Increased to 90 seconds for more robustness
 
 # ------------------------------------------------------------------------------
 # Signal & Exit Handling
@@ -89,6 +89,10 @@ def load_dashboards():
     if os.path.exists(DASHBOARD_FILE):
         with open(DASHBOARD_FILE, "r") as f:
             session["dashboards"] = json.load(f)
+            # Ensure "selected" key exists for old entries
+            for dashboard in session["dashboards"]:
+                if "selected" not in dashboard:
+                    dashboard["selected"] = False
         logging.info(f"Loaded {len(session['dashboards'])} dashboards from {DASHBOARD_FILE}")
 
 def save_dashboards():
@@ -97,10 +101,13 @@ def save_dashboards():
     logging.info(f"Saved {len(session['dashboards'])} dashboards to {DASHBOARD_FILE}")
 
 def sanitize_filename(url):
-    netloc = urlparse(url).netloc.replace('.', '_')
+    netloc = urlparse(url).netloc.replace('.', '_').replace(':', '_') # Replace colon for filename safety
     # Use a part of UUID for uniqueness, avoiding extremely long names
     uid = uuid.uuid4().hex[:6]
-    return f"{netloc}_{uid}"
+    # Simple alphanumeric filter for URL path to keep it short and safe
+    path_segment = re.sub(r'[^a-zA-Z0-9_]', '', urlparse(url).path.replace('/', '_'))
+    return f"{netloc}_{path_segment}_{uid}"
+
 
 # ------------------------------------------------------------------------------
 # Credential Management
@@ -118,7 +125,7 @@ def manage_credentials():
     logging.info("User updated credentials.")
 
 # ------------------------------------------------------------------------------
-# Dashboard Management & Grouping
+# Dashboard Management & Grouping with Checkboxes
 # ------------------------------------------------------------------------------
 def add_dashboard():
     name = simpledialog.askstring("Dashboard Name", "Enter dashboard name:")
@@ -134,33 +141,64 @@ def add_dashboard():
     if any(d["name"].strip().lower() == name.strip().lower() for d in session["dashboards"]):
         messagebox.showerror("Duplicate", "Dashboard name already exists (case-insensitive).")
         return
-    session["dashboards"].append({"name": name.strip(), "url": url.strip(), "group": group.strip()})
+    session["dashboards"].append({"name": name.strip(), "url": url.strip(), "group": group.strip(), "selected": False})
     save_dashboards()
     refresh_dashboard_list()
     update_group_filter()
     logging.info(f"Added dashboard: {name} (URL: {url}, Group: {group})")
 
 def delete_dashboard():
-    selected_indices = listbox.curselection()
-    if not selected_indices:
+    selected_items = treeview.selection()
+    if not selected_items:
         messagebox.showinfo("Delete Dashboard", "Select dashboards to delete.")
         return
     if not messagebox.askyesno("Confirm Delete", "Are you sure to delete selected dashboards?"):
         return
-    selected_names = [listbox.get(i) for i in selected_indices]
-    session["dashboards"] = [d for d in session["dashboards"] if d["name"] not in selected_names]
+    
+    names_to_delete = []
+    for item_id in selected_items:
+        name = treeview.item(item_id, "values")[0] # Get dashboard name from the values tuple
+        names_to_delete.append(name)
+    
+    session["dashboards"] = [d for d in session["dashboards"] if d["name"] not in names_to_delete]
     save_dashboards()
     refresh_dashboard_list()
     update_group_filter()
-    logging.info(f"Deleted dashboards: {', '.join(selected_names)}")
+    logging.info(f"Deleted dashboards: {', '.join(names_to_delete)}")
+
 
 def refresh_dashboard_list():
-    listbox.delete(0, tk.END)
+    for i in treeview.get_children():
+        treeview.delete(i)
+    
     selected_filter = group_filter.get() if group_filter else "All"
-    for dashboard in session["dashboards"]:
+    for idx, dashboard in enumerate(session["dashboards"]):
         group_name = dashboard.get("group", "Default")
         if selected_filter == "All" or group_name == selected_filter:
-            listbox.insert(tk.END, dashboard["name"])
+            checkbox_state = "☑" if dashboard.get("selected", False) else "☐"
+            # Insert item into treeview with checkbox state as the first column
+            treeview.insert("", "end", iid=str(idx), 
+                            values=(checkbox_state, dashboard["name"], dashboard["url"], group_name))
+
+def toggle_selection(event):
+    item_id = treeview.identify_row(event.y)
+    if not item_id:
+        return
+    
+    column = treeview.identify_column(event.x)
+    if column == "#1": # Check if the click was on the first column (checkbox column)
+        # Get the dashboard name from the selected item
+        current_values = treeview.item(item_id, "values")
+        dashboard_name = current_values[1] # Name is now at index 1
+
+        # Find the dashboard in the session data and toggle its 'selected' status
+        for dashboard in session["dashboards"]:
+            if dashboard["name"] == dashboard_name:
+                dashboard["selected"] = not dashboard.get("selected", False)
+                break
+        
+        # Refresh the entire list to update the checkbox visually
+        refresh_dashboard_list()
 
 def update_group_filter():
     groups = {"All"}
@@ -169,6 +207,11 @@ def update_group_filter():
     group_filter_values = sorted(list(groups))
     group_filter['values'] = group_filter_values
     group_filter.set("All") # Reset filter to All after update
+
+def get_selected_dashboards():
+    # Iterate through the actual session data to get selected URLs
+    return [d for d in session["dashboards"] if d.get("selected", False)]
+
 
 # ------------------------------------------------------------------------------
 # Advanced Time Range Selection Using EST and Dropdown Options
@@ -277,55 +320,58 @@ def schedule_analysis():
         interval = int(interval_str)
         if interval < 60: # Minimum 1 minute interval
             raise ValueError("Interval must be at least 60 seconds.")
-    except ValueError as ve:
+    except (ValueError, TypeError) as ve:
         messagebox.showerror("Invalid Interval", str(ve))
-        return
-    except Exception:
-        messagebox.showerror("Invalid Interval", "Please enter a valid positive integer for seconds.")
         return
     global scheduled, schedule_interval
     scheduled = True
     schedule_interval = interval
     messagebox.showinfo("Scheduled", f"Analysis scheduled every {interval} seconds.")
     logging.info("Scheduled analysis every %s seconds", interval)
+    # Start the scheduled analysis, ensuring it runs in a non-blocking way
     run_scheduled_analysis()
 
 def run_scheduled_analysis():
     if not scheduled:
+        logging.info("Scheduled analysis cancelled from within the loop.")
         return
     logging.info("Initiating scheduled analysis.")
-    analyze_selected()  # trigger analysis (non-blocking)
-    app.after(schedule_interval * 1000, run_scheduled_analysis)
+    # Ensure this runs in a separate thread to not block the GUI
+    # analyze_selected will itself create Playwright threads
+    Thread(target=analyze_selected, daemon=True).start()
+    app.after(schedule_interval * 1000, run_scheduled_analysis) # Schedule next run
 
 def cancel_scheduled_analysis():
     global scheduled
     scheduled = False
     messagebox.showinfo("Scheduled", "Scheduled analysis has been cancelled.")
-    logging.info("Scheduled analysis cancelled.")
+    logging.info("Scheduled analysis cancelled by user.")
 
 # ------------------------------------------------------------------------------
 # Dashboard Analysis & Progress Tracking
 # ------------------------------------------------------------------------------
 def analyze_selected():
-    selected_names = [listbox.get(i) for i in listbox.curselection()]
-    if not selected_names:
+    selected_dashboards = get_selected_dashboards()
+    if not selected_dashboards:
         messagebox.showwarning("Analyze Dashboards", "Select at least one dashboard.")
         return
     if not session["username"] or not session["password"]:
         messagebox.showerror("Credentials Missing", 
                              "Please set valid credentials in .secrets or update via Settings.")
         return
+    
     start, end = get_time_range()
     if not start or not end:
         logging.info("Time range selection cancelled by user.")
         return # User cancelled time range selection
-    # Collect URLs from selected dashboards.
-    selected_urls = [d["url"] for d in session["dashboards"] if d["name"] in selected_names]
+    
+    selected_urls = [d["url"] for d in selected_dashboards]
     progress_bar['maximum'] = len(selected_urls)
     progress_bar['value'] = 0
     logging.info(f"Starting analysis for {len(selected_urls)} dashboards from {start} to {end}")
-    # The analyze_dashboards function needs to be defined
-    Thread(target=lambda: asyncio.run(analyze_dashboards(selected_urls, start, end)),
+    
+    # Run the asyncio logic in a separate thread to prevent blocking the Tkinter GUI
+    Thread(target=lambda: asyncio.run(analyze_dashboards_async(selected_urls, start, end)),
            daemon=True).start()
 
 
@@ -336,22 +382,29 @@ async def _wait_for_splunk_dashboard_to_load(page: Page, timeout_ms: int = SPLUN
     This includes:
     1. Waiting for the main dashboard content area to be present.
     2. Waiting for all 'dashboard-panel' elements to appear.
-    3. Iteratively checking if panels have non-zero height and don't contain
-       common loading/waiting indicators.
+    3. Clicking a 'Submit' or 'Apply' button if available after time range selection.
+    4. Iteratively checking if panels have non-zero height and all export options are enabled,
+       and don't contain common loading/waiting indicators.
     """
     logging.info(f"Waiting for dashboard elements to load (timeout: {timeout_ms / 1000}s)...")
     
-    # Wait for the main dashboard content container.
-    # This might be 'div.dashboard-body', 'div.dashboard-view', or similar.
-    # Adjust selector based on your Splunk version if needed.
     await page.wait_for_selector("div.dashboard-body, div.dashboard-view", timeout=timeout_ms)
-    
-    # Wait for at least one dashboard panel to be visible.
     await page.wait_for_selector("div.dashboard-panel", state="visible", timeout=timeout_ms)
 
-    # Use a loop with `wait_for_function` and `page.evaluate` for more robust checks.
-    # This loop ensures we check for panels to be visible AND their content loaded.
-    
+    # Attempt to click a 'Submit' or 'Apply' button if available after time range selection
+    try:
+        logging.info("Checking for 'Submit' or 'Apply' buttons after time range selection.")
+        # Common selectors for submit/apply buttons in Splunk forms/dashboards
+        # Using a more robust selector that looks for role="button" or common button tags with specific text
+        submit_button = await page.query_selector('button:has-text("Submit"), button:has-text("Apply"), [role="button"]:has-text("Submit"), [role="button"]:has-text("Apply")')
+        if submit_button and await submit_button.is_enabled():
+            logging.info("Found an enabled 'Submit'/'Apply' button, clicking it.")
+            await submit_button.click()
+            # Wait for network activity to settle after the click, as this often triggers data loads
+            await page.wait_for_load_state('networkidle', timeout=SPLUNK_WAIT_TIMEOUT_MS / 2) 
+    except Exception as e:
+        logging.debug(f"No 'Submit' or 'Apply' button found or clickable: {e}. This might be expected if the dashboard doesn't have such a button.")
+
     # Common Splunk loading indicators we want to avoid:
     loading_indicators = [
         "Waiting for input",
@@ -374,6 +427,7 @@ async def _wait_for_splunk_dashboard_to_load(page: Page, timeout_ms: int = SPLUN
             let allPanelsRendered = true;
             let allPanelsLoaded = true;
             let panelsWithLoadingText = [];
+            let panelsWithDisabledExport = [];
 
             panels.forEach(panel => {{
                 // Check if panel is visible and has some height
@@ -386,31 +440,48 @@ async def _wait_for_splunk_dashboard_to_load(page: Page, timeout_ms: int = SPLUN
                 const isLoading = loadingIndicators.some(indicator => panelText.includes(indicator));
                 if (isLoading) {{
                     allPanelsLoaded = false;
-                    panelsWithLoadingText.push(panelText.substring(0, 50) + "..."); // log a snippet
+                    panelsWithLoadingText.push(panelText.substring(0, Math.min(panelText.length, 50)) + "...");
+                }}
+
+                // Check if export/open in search button is enabled, indicating data is ready
+                // Adjust these selectors based on your Splunk version's actual button classes/text
+                // Look for common export buttons, which are usually `<a>` or `<button>` tags within actions
+                const exportButton = panel.querySelector('a[data-test-name*="export-button"], button[data-test-name*="export-button"], a[aria-label*="Export"], button[aria-label*="Export"], a:has-text("Export"), button:has-text("Export"), a:has-text("Open in Search"), button:has-text("Open in Search")');
+                
+                // If an export button exists, check if it's disabled. A disabled export button usually means data isn't ready.
+                if (exportButton && exportButton.hasAttribute('disabled')) {{
+                    allPanelsLoaded = false;
+                    panelsWithDisabledExport.push("Panel with disabled export button");
                 }}
             }});
 
-            if (allPanelsRendered && allPanelsLoaded) {{
+            if (allPanelsRendered && allPanelsLoaded && panelsWithDisabledExport.length === 0) {{
                 return {{ allLoaded: true }};
             }} else if (!allPanelsRendered) {{
                 return {{ allLoaded: false, reason: 'not_rendered' }};
-            }} else {{ // !allPanelsLoaded
+            }} else if (panelsWithLoadingText.length > 0) {{
                 return {{ allLoaded: false, reason: 'loading_text_present', panelsWithLoadingText: panelsWithLoadingText }};
+            }} else if (panelsWithDisabledExport.length > 0) {{
+                return {{ allLoaded: false, reason: 'export_button_disabled', panelsWithDisabledExport: panelsWithDisabledExport }};
+            }} else {{
+                return {{ allLoaded: false, reason: 'unknown' }};
             }}
         }}""", loading_indicators)
 
         if panels_state["allLoaded"]:
-            logging.info("All Splunk dashboard panels appear to be loaded.")
-            await asyncio.sleep(1) # Give a small buffer for any final rendering
+            logging.info("All Splunk dashboard panels appear to be loaded and ready.")
+            await asyncio.sleep(2) # Give a slightly longer buffer for any final rendering after all checks pass
             return True
         else:
             reason = panels_state.get('reason', 'unknown')
             log_msg = f"Dashboard not fully loaded yet. Reason: {reason}"
             if 'panelsWithLoadingText' in panels_state and panels_state['panelsWithLoadingText']:
                 log_msg += f". Panels with loading text: {panels_state['panelsWithLoadingText']}"
-            logging.debug(log_msg) # Use debug for frequent checks
+            if 'panelsWithDisabledExport' in panels_state and panels_state['panelsWithDisabledExport']:
+                log_msg += f". Panels with disabled export: {panels_state['panelsWithDisabledExport']}"
+            logging.debug(log_msg) # Use debug for frequent checks during polling
 
-        await asyncio.sleep(2) # Wait 2 seconds before checking again
+        await asyncio.sleep(3) # Increased wait to 3 seconds before checking again for stability
 
     raise TimeoutError(f"Splunk dashboard panels did not load within {timeout_ms / 1000} seconds.")
 
@@ -429,10 +500,13 @@ async def visit_dashboard(url, start, end):
             async with async_playwright() as p:
                 # Set headless=False for debugging, change to True for production
                 browser = await p.chromium.launch(headless=True) 
-                context = await browser.new_context()
+                # Create a new context for each dashboard to ensure isolation
+                context = await browser.new_context() 
                 page = await context.new_page()
                 logging.info(f"Navigating to {url} (Attempt {attempt}/{retries})")
-                await page.goto(url, wait_until="load", timeout=SPLUNK_WAIT_TIMEOUT_MS) # Use 'load' initially for faster page load
+                
+                # Navigate to the URL and wait for the initial page load
+                await page.goto(url, wait_until="load", timeout=SPLUNK_WAIT_TIMEOUT_MS)
 
                 # Check for login page first
                 if await page.query_selector('input[placeholder="Username"]'):
@@ -443,11 +517,12 @@ async def visit_dashboard(url, start, end):
                     await page.fill('input[placeholder="Password"]', session["password"])
                     await page.press('input[placeholder="Password"]', "Enter")
                     logging.info("Attempted login, waiting for navigation...")
-                    # Wait for navigation after login, then apply intelligent wait
-                    await page.wait_for_url(url, wait_until="domcontentloaded", timeout=SPLUNK_WAIT_TIMEOUT_MS) # Wait for original URL
-
-                    # Give it a moment for elements to appear after navigation, then intelligent wait
-                    await asyncio.sleep(2) # Small pause
+                    
+                    # Wait for navigation after login to the original URL
+                    await page.wait_for_url(url, wait_until="domcontentloaded", timeout=SPLUNK_WAIT_TIMEOUT_MS) 
+                    
+                    # Small pause before intelligent wait to allow elements to render
+                    await asyncio.sleep(2) 
                     await _wait_for_splunk_dashboard_to_load(page, SPLUNK_WAIT_TIMEOUT_MS)
                     logging.info("Splunk dashboard loaded after login.")
 
@@ -456,6 +531,7 @@ async def visit_dashboard(url, start, end):
                     # Directly apply intelligent wait if no login was needed
                     await _wait_for_splunk_dashboard_to_load(page, SPLUNK_WAIT_TIMEOUT_MS)
 
+                # Take screenshot after ensuring the dashboard is fully loaded
                 safe_filename = sanitize_filename(url)
                 # Use EST time for the screenshot stamp.
                 stamp = datetime.now(est).strftime("%Y%m%d_%H%M%S")
@@ -471,15 +547,15 @@ async def visit_dashboard(url, start, end):
             if page:
                 error_screenshot_path = os.path.join(SCREENSHOT_DIR, f"error_screenshot_{sanitize_filename(url)}_{stamp if 'stamp' in locals() else 'unknown'}_attempt{attempt}.png")
                 try:
-                    await page.screenshot(path=error_screenshot_path)
+                    await page.screenshot(path=error_screenshot_path, full_page=True)
                     logging.error(f"Error screenshot saved to {error_screenshot_path}")
                 except Exception as se:
                     logging.error(f"Failed to capture error screenshot: {se}")
             
             if attempt == retries:
                 return f"❌ {url}: Failed after {retries} attempts. Last error: {e}"
-            logging.info(f"Retrying {url} in 2 seconds...")
-            await asyncio.sleep(2) # Wait before retrying
+            logging.info(f"Retrying {url} in 5 seconds...") # Increased retry wait
+            await asyncio.sleep(5) # Wait before retrying
         finally:
             if context:
                 await context.close()
@@ -488,7 +564,7 @@ async def visit_dashboard(url, start, end):
             logging.info(f"Browser closed for {url}")
 
 
-async def analyze_dashboards(urls, start, end):
+async def analyze_dashboards_async(urls, start, end):
     """
     Asynchronously analyzes a list of dashboard URLs.
     This function creates and manages the Playwright browser context for each URL
@@ -548,7 +624,7 @@ def show_results(messages, start, end):
 # ------------------------------------------------------------------------------
 app = tk.Tk()
 app.title("Splunk Dashboard Desktop Client")
-app.geometry("800x600")
+app.geometry("900x700") # Increased window size for Treeview
 
 # Menu for Settings.
 menu_bar = tk.Menu(app)
@@ -574,14 +650,36 @@ group_filter.grid(row=1, column=1, padx=5, pady=5)
 group_filter.bind("<<ComboboxSelected>>", lambda e: refresh_dashboard_list())
 update_group_filter()
 
-# Dashboard list.
-tk.Label(app, text="Saved Dashboards:").pack()
-listbox = tk.Listbox(app, selectmode=tk.MULTIPLE, width=80, height=15)
-listbox.pack(pady=10)
+# Dashboard list (using Treeview for checkboxes)
+tk.Label(app, text="Saved Dashboards: (Click on checkbox to select)").pack(pady=(10,0))
+treeview_frame = tk.Frame(app)
+treeview_frame.pack(pady=5, fill=tk.BOTH, expand=True)
+
+treeview = ttk.Treeview(treeview_frame, columns=("Selected", "Name", "URL", "Group"), show="headings")
+
+treeview.heading("Selected", text="☑", anchor=tk.CENTER)
+treeview.column("Selected", width=40, anchor=tk.CENTER, stretch=tk.NO)
+treeview.heading("Name", text="Dashboard Name")
+treeview.column("Name", width=200, stretch=tk.YES)
+treeview.heading("URL", text="URL")
+treeview.column("URL", width=350, stretch=tk.YES)
+treeview.heading("Group", text="Group")
+treeview.column("Group", width=100, stretch=tk.YES)
+
+# Bind the click event to the treeview to handle checkbox toggling
+treeview.bind("<Button-1>", toggle_selection)
+
+treeview.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+# Add a scrollbar to the treeview
+treeview_scrollbar = ttk.Scrollbar(treeview_frame, orient="vertical", command=treeview.yview)
+treeview.configure(yscrollcommand=treeview_scrollbar.set)
+treeview_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
 
 # Progress bar for analysis.
-progress_bar = ttk.Progressbar(app, orient="horizontal", mode="determinate", length=400)
-progress_bar.pack(pady=10)
+progress_bar = ttk.Progressbar(app, orient="horizontal", mode="determinate", length=600)
+progress_bar.pack(pady=20)
 
 load_dashboards()
 refresh_dashboard_list()
