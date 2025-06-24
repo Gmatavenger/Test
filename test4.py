@@ -14,7 +14,7 @@ import tkinter as tk
 from tkinter import ttk, simpledialog, messagebox, scrolledtext
 from tkcalendar import DateEntry
 
-from playwright.async_api import async_playwright, Playwright, BrowserContext, Page
+from playwright.async_api import async_playwright, BrowserContext, Page
 from dotenv import load_dotenv
 import pytz
 
@@ -48,6 +48,15 @@ except Exception as e:
 # ------------------------------------------------------------------------------
 # Global Variables & Session Setup
 # ------------------------------------------------------------------------------
+scheduled = False
+schedule_interval = 0  # in seconds
+
+# UI elements that need to be globally accessible
+app = None
+progress_bar = None
+treeview = None
+group_filter = None
+
 # Credentials are not loaded from .env at startup if .secrets is missing,
 # but can be set via the UI and stored in session cache.
 USERNAME = os.getenv("SPLUNK_USERNAME")
@@ -69,6 +78,12 @@ os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 # For scheduled runs - Declare global variables
 scheduled = False
 schedule_interval = 0  # in seconds
+
+# UI elements that need to be globally accessible before their full initialization
+app = None
+progress_bar = None
+treeview = None
+group_filter = None
 
 # Define a default wait timeout for Splunk operations
 SPLUNK_WAIT_TIMEOUT_MS = 120000 # Increased to 120 seconds for more robustness
@@ -187,6 +202,10 @@ def add_dashboard():
     logging.info(f"Added dashboard: {name} (URL: {url}, Group: {group})")
 
 def delete_dashboard():
+    if treeview is None:
+        messagebox.showerror("Error", "Treeview not initialized")
+        return
+        
     selected_items_ids = treeview.selection()
     if not selected_items_ids:
         messagebox.showinfo("Delete Dashboard", "Select dashboards to delete.")
@@ -211,6 +230,9 @@ def delete_dashboard():
 
 
 def refresh_dashboard_list():
+    if treeview is None:
+        return
+        
     for i in treeview.get_children():
         treeview.delete(i)
     
@@ -224,6 +246,9 @@ def refresh_dashboard_list():
                             values=(checkbox_state, dashboard["name"], dashboard["url"], group_name, status))
 
 def toggle_selection(event):
+    if treeview is None:
+        return
+        
     item_id = treeview.identify_row(event.y)
     if not item_id:
         return
@@ -255,6 +280,9 @@ def deselect_all_dashboards():
     logging.info("Deselected all dashboards.")
 
 def update_group_filter():
+    if group_filter is None:
+        return
+        
     groups = {"All"}
     for d in session["dashboards"]:
         groups.add(d.get("group", "Default"))
@@ -270,6 +298,9 @@ def get_selected_dashboards():
 
 def update_dashboard_status_ui(dashboard_name, status_message):
     """Updates the status column for a specific dashboard in the Treeview."""
+    if treeview is None:
+        return
+        
     for idx, dashboard in enumerate(session["dashboards"]):
         if dashboard["name"] == dashboard_name:
             dashboard["status"] = status_message
@@ -552,64 +583,65 @@ async def _wait_for_splunk_dashboard_to_load(page: Page, timeout_ms: int = SPLUN
     # Loop and check panel states for a maximum duration
     start_time = datetime.now()
     while (datetime.now() - start_time).total_seconds() * 1000 < timeout_ms:
-        panels_state = await page.evaluate(f"""(loadingIndicators) => {{
-            const panels = document.querySelectorAll("splunk-dashboard-panel, div.dashboard-panel");
-            if (panels.length === 0) return {{ allLoaded: false, reason: 'no_panels_found' }};
+        panels_state = await page.evaluate("""
+            (loadingIndicators) => {
+                const panels = document.querySelectorAll("splunk-dashboard-panel, div.dashboard-panel");
+                if (panels.length === 0) return { allLoaded: false, reason: 'no_panels_found' };
 
-            let allPanelsRendered = true;
-            let allPanelsLoaded = true;
-            let panelsWithLoadingText = [];
-            let panelsWithDisabledExport = [];
+                let allPanelsRendered = true;
+                let allPanelsLoaded = true;
+                let panelsWithLoadingText = [];
+                let panelsWithDisabledExport = [];
 
-            panels.forEach(panel => {{
-                // Check if panel is visible and has some height/width (rendered)
-                if (panel.offsetHeight === 0 || panel.offsetWidth === 0 || window.getComputedStyle(panel).visibility === 'hidden') {{
-                    allPanelsRendered = false;
-                }}
+                panels.forEach(panel => {
+                    // Check if panel is visible and has some height/width (rendered)
+                    if (panel.offsetHeight === 0 || panel.offsetWidth === 0 || window.getComputedStyle(panel).visibility === 'hidden') {
+                        allPanelsRendered = false;
+                    }
 
-                // Check for loading/waiting text within the panel's direct text content or children
-                const panelText = panel.innerText;
-                const isLoading = loadingIndicators.some(indicator => panelText.includes(indicator));
-                if (isLoading) {{
-                    allPanelsLoaded = false;
-                    panelsWithLoadingText.push(panelText.substring(0, Math.min(panelText.length, 50)) + "...");
-                }}
+                    // Check for loading/waiting text within the panel's direct text content or children
+                    const panelText = panel.innerText;
+                    const isLoading = loadingIndicators.some(indicator => panelText.includes(indicator));
+                    if (isLoading) {
+                        allPanelsLoaded = false;
+                        panelsWithLoadingText.push(panelText.substring(0, Math.min(panelText.length, 50)) + "...");
+                    }
 
-                // --- Crucial Check: Export/Open in Search Button Status ---
-                // This typically becomes enabled only when data is fully loaded in the panel.
-                const exportButton = panel.querySelector(
-                    'a[data-test-name*="export-button"], button[data-test-name*="export-button"], ' +
-                    'a[aria-label*="Export"], button[aria-label*="Export"], ' +
-                    'a:has-text("Export"), button:has-text("Export"), ' +
-                    'a:has-text("Open in Search"), button:has-text("Open in Search")'
-                );
-                
-                // If an export button exists, check if it's disabled.
-                // A disabled export button usually means data isn't ready.
-                // Also check for its visibility to ensure it's part of the active UI.
-                if (exportButton && exportButton.hasAttribute('disabled') && exportButton.offsetParent !== null) {{
-                    allPanelsLoaded = false;
-                    panelsWithDisabledExport.push("Panel with disabled export button: " + (panel.querySelector('.panel-title, .viz-title')?.innerText || 'No Title'));
-                }} else if (exportButton && exportButton.offsetParent === null) {
-                    // Button exists but not visible (e.g., hidden by CSS, not fully rendered)
-                    allPanelsLoaded = false;
-                    panelsWithDisabledExport.push("Panel with non-visible export button: " + (panel.querySelector('.panel-title, .viz-title')?.innerText || 'No Title'));
+                    // --- Crucial Check: Export/Open in Search Button Status ---
+                    // This typically becomes enabled only when data is fully loaded in the panel.
+                    const exportButton = panel.querySelector(
+                        'a[data-test-name*="export-button"], button[data-test-name*="export-button"], ' +
+                        'a[aria-label*="Export"], button[aria-label*="Export"], ' +
+                        'a:has-text("Export"), button:has-text("Export"), ' +
+                        'a:has-text("Open in Search"), button:has-text("Open in Search")'
+                    );
+                    
+                    // If an export button exists, check if it's disabled.
+                    // A disabled export button usually means data isn't ready.
+                    // Also check for its visibility to ensure it's part of the active UI.
+                    if (exportButton && exportButton.hasAttribute('disabled') && exportButton.offsetParent !== null) {
+                        allPanelsLoaded = false;
+                        panelsWithDisabledExport.push("Panel with disabled export button: " + (panel.querySelector('.panel-title, .viz-title')?.innerText || 'No Title'));
+                    } else if (exportButton && exportButton.offsetParent === null) {
+                        # Button exists but not visible (e.g., hidden by CSS, not fully rendered)
+                        allPanelsLoaded = false;
+                        panelsWithDisabledExport.push("Panel with non-visible export button: " + (panel.querySelector('.panel-title, .viz-title')?.innerText || 'No Title'));
+                    }
+                });
+
+                if (allPanelsRendered && allPanelsLoaded && panelsWithDisabledExport.length === 0) {
+                    return { allLoaded: true };
+                } else if (!allPanelsRendered) {
+                    return { allLoaded: false, reason: 'not_rendered_or_visible' };
+                } else if (panelsWithLoadingText.length > 0) {
+                    return { allLoaded: false, reason: 'loading_text_present', panelsWithLoadingText: panelsWithLoadingText };
+                } else if (panelsWithDisabledExport.length > 0) {
+                    return { allLoaded: false, reason: 'export_button_disabled_or_hidden', panelsWithDisabledExport: panelsWithDisabledExport };
+                } else {
+                    return { allLoaded: false, reason: 'unknown_loading_state' };
                 }
-            }});
-
-            // **FIX HERE: Change {{ to { and }} to } for JavaScript object literals**
-            if (allPanelsRendered && allPanelsLoaded && panelsWithDisabledExport.length === 0) {
-                return { allLoaded: true };
-            } else if (!allPanelsRendered) {
-                return { allLoaded: false, reason: 'not_rendered_or_visible' };
-            } else if (panelsWithLoadingText.length > 0) {
-                return { allLoaded: false, reason: 'loading_text_present', panelsWithLoadingText: panelsWithLoadingText };
-            } else if (panelsWithDisabledExport.length > 0) {
-                return { allLoaded: false, reason: 'export_button_disabled_or_hidden', panelsWithDisabledExport: panelsWithDisabledExport };
-            } else {
-                return { allLoaded: false, reason: 'unknown_loading_state' };
             }
-        }}""", loading_indicators)
+        """, loading_indicators)
 
         if panels_state["allLoaded"]:
             logging.info("All Splunk dashboard panels appear to be loaded and ready.")
@@ -790,6 +822,7 @@ def show_results(messages, start, end):
 # ------------------------------------------------------------------------------
 # Main Application UI Setup
 # ------------------------------------------------------------------------------
+
 app = tk.Tk()
 app.title("Splunk Dashboard Desktop Client")
 app.geometry("1000x700") # Increased window size for Treeview and new column
@@ -819,11 +852,6 @@ tk.Label(filter_select_frame, text="Filter by Group:").pack(side=tk.LEFT, padx=5
 group_filter = ttk.Combobox(filter_select_frame, state="readonly", width=15)
 group_filter.pack(side=tk.LEFT, padx=5)
 group_filter.bind("<<ComboboxSelected>>", lambda e: refresh_dashboard_list())
-update_group_filter()
-
-tk.Button(filter_select_frame, text="Select All", command=select_all_dashboards).pack(side=tk.LEFT, padx=15)
-tk.Button(filter_select_frame, text="Deselect All", command=deselect_all_dashboards).pack(side=tk.LEFT, padx=5)
-
 
 # Dashboard list (using Treeview for checkboxes and status)
 tk.Label(app, text="Saved Dashboards: (Click on checkbox column to select)").pack(pady=(10,0))
@@ -832,18 +860,21 @@ treeview_frame.pack(pady=5, fill=tk.BOTH, expand=True, padx=10)
 
 # Define columns and headings
 columns = ("Selected", "Name", "URL", "Group", "Status")
-treeview = ttk.Treeview(treeview_frame, columns=columns, show="headings")
+treeview = ttk.Treeview(treeview_frame, columns=columns, show="headings") # <--- Assign to global treeview
 
-treeview.heading("Selected", text="☑", anchor=tk.CENTER)
-treeview.column("Selected", width=40, anchor=tk.CENTER, stretch=tk.NO)
-treeview.heading("Name", text="Dashboard Name")
-treeview.column("Name", width=200, stretch=tk.YES)
+# Configure treeview columns
+treeview.heading("Selected", text="Selected", anchor=tk.CENTER)
+treeview.heading("Name", text="Name")
 treeview.heading("URL", text="URL")
-treeview.column("URL", width=350, stretch=tk.YES)
 treeview.heading("Group", text="Group")
-treeview.column("Group", width=100, stretch=tk.YES)
 treeview.heading("Status", text="Status")
-treeview.column("Status", width=120, stretch=tk.NO) # Status column with fixed width
+
+# Set column widths and alignment
+treeview.column("Selected", width=60, anchor=tk.CENTER, stretch=False)
+treeview.column("Name", width=150, stretch=True)
+treeview.column("URL", width=300, stretch=True)
+treeview.column("Group", width=100, stretch=True)
+treeview.column("Status", width=150, stretch=True)
 
 # Bind the click event to the treeview to handle checkbox toggling
 treeview.bind("<Button-1>", toggle_selection)
@@ -855,11 +886,13 @@ treeview_scrollbar = ttk.Scrollbar(treeview_frame, orient="vertical", command=tr
 treeview.configure(yscrollcommand=treeview_scrollbar.set)
 treeview_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-
 # Progress bar for analysis.
-progress_bar = ttk.Progressbar(app, orient="horizontal", mode="determinate", length=600)
+progress_bar = ttk.Progressbar(app, orient="horizontal", mode="determinate", length=600) # <--- Assign to global progress_bar
 progress_bar.pack(pady=20)
 
+# Now load the dashboards and update the UI
 load_dashboards()
+update_group_filter()
 refresh_dashboard_list()
+
 app.mainloop()
