@@ -550,11 +550,11 @@ async def _wait_for_splunk_dashboard_to_load(page: Page, timeout_ms: int = SPLUN
                 if (exportButton && exportButton.hasAttribute('disabled') && exportButton.offsetParent !== null) {{
                     allPanelsLoaded = false;
                     panelsWithDisabledExport.push("Panel with disabled export button: " + (panel.querySelector('.panel-title, .viz-title')?.innerText || 'No Title'));
-                }} else if (exportButton && exportButton.offsetParent === null) {
+                }} else if (exportButton && exportButton.offsetParent === null) {{
                     // Button exists but not visible (e.g., hidden by CSS, not fully rendered)
                     allPanelsLoaded = false;
                     panelsWithDisabledExport.push("Panel with non-visible export button: " + (panel.querySelector('.panel-title, .viz-title')?.innerText || 'No Title'));
-                }
+                }}
             }});
 
             if (allPanelsRendered && allPanelsLoaded && panelsWithDisabledExport.length === 0) {{
