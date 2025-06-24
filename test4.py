@@ -66,7 +66,7 @@ est = pytz.timezone("America/New_York")
 SCREENSHOT_DIR = os.path.join("screenshots", datetime.now(est).strftime("%Y-%m-%d"))
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
-# For scheduled runs
+# For scheduled runs - Declare global variables
 scheduled = False
 schedule_interval = 0  # in seconds
 
@@ -383,6 +383,8 @@ def get_time_range():
 # Scheduled Analysis Functionality
 # ------------------------------------------------------------------------------
 def schedule_analysis():
+    global scheduled, schedule_interval # Declare global for assignment
+
     if scheduled:
         messagebox.showinfo("Scheduled", "Analysis is already scheduled. Please cancel it first.")
         return
@@ -397,29 +399,61 @@ def schedule_analysis():
         messagebox.showerror("Invalid Interval", str(ve))
         return
     
-    global scheduled, schedule_interval
     scheduled = True
     schedule_interval = interval
     messagebox.showinfo("Scheduled", f"Analysis scheduled every {interval} seconds.")
     logging.info("Scheduled analysis every %s seconds. Starting first run.", interval)
     
-    # Start the first scheduled analysis run
-    app.after(0, run_scheduled_analysis) # Use app.after to run immediately without blocking
+    # Start the first scheduled analysis run, using app.after to stay on main thread
+    app.after(0, run_scheduled_analysis)
+
+def _run_scheduled_analysis_background():
+    """
+    This function runs in a background thread and performs the actual scheduled analysis.
+    It does not interact with the GUI directly (except via app.after for updates).
+    """
+    # Define the time range for scheduled runs directly here or load from config
+    # For example, "Last 4 Hours EST"
+    now_est = datetime.now(est)
+    start = (now_est - timedelta(hours=4)).strftime("%Y-%m-%d %H:%M")
+    end = now_est.strftime("%Y-%m-%d %H:%M")
+    
+    selected_dashboards = get_selected_dashboards() 
+    if not selected_dashboards:
+        logging.warning("No dashboards selected for scheduled analysis.")
+        return
+
+    # Update GUI elements using app.after (important for thread safety)
+    # Reset status of selected dashboards before starting
+    app.after(0, lambda: [update_dashboard_status_ui(db["name"], "Pending...") for db in selected_dashboards])
+    app.after(0, lambda: progress_bar.config(maximum=len(selected_dashboards), value=0))
+
+    selected_dashboard_data = [{"url": d["url"], "name": d["name"]} for d in selected_dashboards]
+    logging.info(f"Initiating scheduled analysis for {len(selected_dashboard_data)} dashboards from {start} to {end}")
+
+    asyncio.run(analyze_dashboards_async(selected_dashboard_data, start, end))
+
 
 def run_scheduled_analysis():
+    """
+    Manages the scheduling loop. This function is called by app.after.
+    It kicks off the background analysis and then reschedules itself.
+    """
+    global scheduled # Ensure we're using the global variable
+
     if not scheduled:
         logging.info("Scheduled analysis loop terminated.")
         return
     
     logging.info("Initiating scheduled analysis run.")
-    # analyze_selected will initiate its own thread for async Playwright operations
-    Thread(target=analyze_selected, daemon=True).start()
+    # Run the actual analysis logic in a separate thread to prevent blocking the GUI
+    Thread(target=_run_scheduled_analysis_background, daemon=True).start()
     
-    # Schedule the next run
+    # Schedule the next run on the main thread
     app.after(schedule_interval * 1000, run_scheduled_analysis)
 
 def cancel_scheduled_analysis():
-    global scheduled
+    global scheduled # Declare global for assignment
     if not scheduled:
         messagebox.showinfo("Scheduled", "No analysis is currently scheduled.")
         return
@@ -431,6 +465,9 @@ def cancel_scheduled_analysis():
 # Dashboard Analysis & Progress Tracking
 # ------------------------------------------------------------------------------
 def analyze_selected():
+    """
+    Handles manual "Analyze Selected" action, including GUI for time range.
+    """
     selected_dashboards = get_selected_dashboards()
     if not selected_dashboards:
         messagebox.showwarning("Analyze Dashboards", "Select at least one dashboard.")
@@ -440,9 +477,10 @@ def analyze_selected():
                              "Please set valid credentials via Settings -> Manage Credentials.")
         return
     
+    # get_time_range() uses Toplevel and simpledialog, must be on main thread
     start, end = get_time_range()
     if not start or not end:
-        logging.info("Time range selection cancelled by user.")
+        logging.info("Time range selection cancelled by user for manual analysis.")
         return # User cancelled time range selection
     
     # Update status to "Pending" for selected dashboards before analysis
@@ -452,7 +490,7 @@ def analyze_selected():
     selected_dashboard_data = [{"url": d["url"], "name": d["name"]} for d in selected_dashboards]
     progress_bar['maximum'] = len(selected_dashboard_data)
     progress_bar['value'] = 0
-    logging.info(f"Starting analysis for {len(selected_dashboard_data)} dashboards from {start} to {end}")
+    logging.info(f"Starting manual analysis for {len(selected_dashboard_data)} dashboards from {start} to {end}")
     
     # Run the asyncio logic in a separate thread to prevent blocking the Tkinter GUI
     Thread(target=lambda: asyncio.run(analyze_dashboards_async(selected_dashboard_data, start, end)),
@@ -550,11 +588,11 @@ async def _wait_for_splunk_dashboard_to_load(page: Page, timeout_ms: int = SPLUN
                 if (exportButton && exportButton.hasAttribute('disabled') && exportButton.offsetParent !== null) {{
                     allPanelsLoaded = false;
                     panelsWithDisabledExport.push("Panel with disabled export button: " + (panel.querySelector('.panel-title, .viz-title')?.innerText || 'No Title'));
-                }} else if (exportButton && exportButton.offsetParent === null) {{
+                }} else if (exportButton && exportButton.offsetParent === null) {
                     // Button exists but not visible (e.g., hidden by CSS, not fully rendered)
                     allPanelsLoaded = false;
                     panelsWithDisabledExport.push("Panel with non-visible export button: " + (panel.querySelector('.panel-title, .viz-title')?.innerText || 'No Title'));
-                }}
+                }
             }});
 
             if (allPanelsRendered && allPanelsLoaded && panelsWithDisabledExport.length === 0) {{
@@ -600,7 +638,7 @@ async def visit_dashboard(dashboard_data, start, end):
     retries = 2 # Reduced retries, relying more on robust wait
     result_message = ""
 
-    # Update UI status
+    # Update UI status - always use app.after for GUI updates from background threads
     app.after(0, update_dashboard_status_ui, name, "In Progress...")
 
     async with browser_semaphore: # Acquire a slot from the semaphore
@@ -610,6 +648,7 @@ async def visit_dashboard(dashboard_data, start, end):
             page = None
             try:
                 async with async_playwright() as p:
+                    # Headless is generally better for automated tasks
                     browser = await p.chromium.launch(headless=True) 
                     context = await browser.new_context() 
                     page = await context.new_page()
@@ -665,7 +704,9 @@ async def visit_dashboard(dashboard_data, start, end):
                 
                 # Capture a screenshot on error for debugging, if page object exists
                 if page:
-                    error_screenshot_path = os.path.join(SCREENSHOT_DIR, f"error_screenshot_{sanitize_filename(url)}_{stamp if 'stamp' in locals() else 'unknown'}_attempt{attempt}.png")
+                    # Ensure stamp is defined even if initial navigation fails
+                    stamp_error = datetime.now(est).strftime("%Y%m%d_%H%M%S")
+                    error_screenshot_path = os.path.join(SCREENSHOT_DIR, f"error_screenshot_{sanitize_filename(url)}_{stamp_error}_attempt{attempt}.png")
                     try:
                         await page.screenshot(path=error_screenshot_path, full_page=True)
                         logging.error(f"Error screenshot saved to {error_screenshot_path}")
@@ -819,3 +860,5 @@ progress_bar.pack(pady=20)
 load_dashboards()
 refresh_dashboard_list()
 app.mainloop()
+
+```
