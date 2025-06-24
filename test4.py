@@ -425,7 +425,9 @@ def _run_scheduled_analysis_background():
 
     # Update GUI elements using app.after (important for thread safety)
     # Reset status of selected dashboards before starting
-    app.after(0, lambda: [update_dashboard_status_ui(db["name"], "Pending...") for db in selected_dashboards])
+    for db in selected_dashboards:
+        app.after(0, update_dashboard_status_ui, db["name"], "Pending...")
+        
     app.after(0, lambda: progress_bar.config(maximum=len(selected_dashboards), value=0))
 
     selected_dashboard_data = [{"url": d["url"], "name": d["name"]} for d in selected_dashboards]
@@ -595,17 +597,18 @@ async def _wait_for_splunk_dashboard_to_load(page: Page, timeout_ms: int = SPLUN
                 }
             }});
 
-            if (allPanelsRendered && allPanelsLoaded && panelsWithDisabledExport.length === 0) {{
-                return {{ allLoaded: true }};
-            }} else if (!allPanelsRendered) {{
-                return {{ allLoaded: false, reason: 'not_rendered_or_visible' }};
-            }} else if (panelsWithLoadingText.length > 0) {{
-                return {{ allLoaded: false, reason: 'loading_text_present', panelsWithLoadingText: panelsWithLoadingText }};
-            }} else if (panelsWithDisabledExport.length > 0) {{
-                return {{ allLoaded: false, reason: 'export_button_disabled_or_hidden', panelsWithDisabledExport: panelsWithDisabledExport }};
-            }} else {{
-                return {{ allLoaded: false, reason: 'unknown_loading_state' }};
-            }}
+            // **FIX HERE: Change {{ to { and }} to } for JavaScript object literals**
+            if (allPanelsRendered && allPanelsLoaded && panelsWithDisabledExport.length === 0) {
+                return { allLoaded: true };
+            } else if (!allPanelsRendered) {
+                return { allLoaded: false, reason: 'not_rendered_or_visible' };
+            } else if (panelsWithLoadingText.length > 0) {
+                return { allLoaded: false, reason: 'loading_text_present', panelsWithLoadingText: panelsWithLoadingText };
+            } else if (panelsWithDisabledExport.length > 0) {
+                return { allLoaded: false, reason: 'export_button_disabled_or_hidden', panelsWithDisabledExport: panelsWithDisabledExport };
+            } else {
+                return { allLoaded: false, reason: 'unknown_loading_state' };
+            }
         }}""", loading_indicators)
 
         if panels_state["allLoaded"]:
@@ -860,5 +863,3 @@ progress_bar.pack(pady=20)
 load_dashboards()
 refresh_dashboard_list()
 app.mainloop()
-
-```
