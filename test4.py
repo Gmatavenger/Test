@@ -689,105 +689,112 @@ async def visit_dashboard(dashboard_data, start, end):
     name = dashboard_data["name"]
     retries = 2
     result_message = ""
-    # Ensure app is initialized before calling app.after
     if app:
         app.after(0, update_dashboard_status_ui, name, "In Progress...")
     else:
         logging.warning(f"App not initialized, cannot update UI status for {name}.")
 
-
     async with browser_semaphore:
-        for attempt in range(1, retries + 1):
-            browser = None
-            context = None
-            page = None
-            try:
-                async with async_playwright() as p:
-                    browser = await p.chromium.launch(headless=True)
-                    context = await browser.new_context()
-                    page = await context.new_page()
-                    logging.info(f"Navigating to {name} ({url}) (Attempt {attempt}/{retries})")
-                    if app: # Ensure app exists before updating UI
-                        app.after(0, update_dashboard_status_ui, name, f"Loading ({attempt}/{retries})...")
-                    
-                    await page.goto(url, wait_until="load", timeout=SPLUNK_WAIT_TIMEOUT_MS)
+        browser = None  # Initialize browser outside the loop
+        context = None  # Initialize context outside the loop
+        page = None     # Initialize page outside the loop
 
-                    # Check for login page first
-                    if await page.query_selector('input[placeholder="Username"]'):
-                        logging.info("Splunk login page detected for %s.", name)
-                        if not session["username"] or not session["password"]:
-                            raise RuntimeError("Login required but credentials not set. Please set them via Settings -> Manage Credentials.")
-                        
-                        if app: # Ensure app exists before updating UI
-                            app.after(0, update_dashboard_status_ui, name, "Logging in...")
-                        await page.fill('input[placeholder="Username"]', session["username"])
-                        await page.fill('input[placeholder="Password"]', session["password"])
-                        
-                        # Use keyboard.press for Enter to simulate user interaction
-                        await page.press('input[placeholder="Password"]', "Enter")
-                        logging.info("Attempted login for %s, waiting for navigation...", name)
-                        
-                        # Wait for navigation after login to the original URL or dashboard home
-                        await page.wait_for_url(url, wait_until="domcontentloaded", timeout=SPLUNK_WAIT_TIMEOUT_MS) 
-                        
-                        # Small pause before intelligent wait to allow elements to render after navigation
-                        await asyncio.sleep(2) 
-                        
-                        if app: # Ensure app exists before updating UI
-                            app.after(0, update_dashboard_status_ui, name, "Waiting for panels (logged in)...")
-                        await _wait_for_splunk_dashboard_to_load(page, SPLUNK_WAIT_TIMEOUT_MS)
-                        logging.info("Splunk dashboard loaded after login for %s.", name)
+        try: # Outer try-finally to ensure browser/context are always closed at the very end
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True) # Launch browser once per dashboard task
+                context = await browser.new_context()
 
-                    else:
-                        logging.info("No login page detected for %s, proceeding with dashboard load wait.", name)
-                        if app: # Ensure app exists before updating UI
-                            app.after(0, update_dashboard_status_ui, name, "Waiting for panels...")
-                        await _wait_for_splunk_dashboard_to_load(page, SPLUNK_WAIT_TIMEOUT_MS)
-
-                    # Take screenshot after ensuring the dashboard is fully loaded
-                    safe_filename = sanitize_filename(url)
-                    stamp = datetime.now(est).strftime("%Y%m%d_%H%M%S")
-                    screenshot_path = os.path.join(SCREENSHOT_DIR, f"screenshot_{safe_filename}_{stamp}.png")
-                    
-                    logging.info(f"Taking screenshot of {name} at {screenshot_path}")
-                    if app: # Ensure app exists before updating UI
-                        app.after(0, update_dashboard_status_ui, name, "Taking screenshot...")
-                    await page.screenshot(path=screenshot_path, full_page=True)
-                    result_message = f"✅ {name} ({start} to {end}): Screenshot -> {screenshot_path}"
-                    if app: # Ensure app exists before updating UI
-                        app.after(0, update_dashboard_status_ui, name, "Success")
-                    return result_message # Success, break out of retry loop
-
-            except Exception as e:
-                error_msg = f"Error during page operations for {name} ({url}) (Attempt {attempt}/{retries}): {e}"
-                logging.error(error_msg)
-                
-                # Capture a screenshot on error for debugging, if page object exists
-                if page:
-                    stamp_error = datetime.now(est).strftime("%Y%m%d_%H%M%S")
-                    error_screenshot_path = os.path.join(SCREENSHOT_DIR, f"error_screenshot_{sanitize_filename(url)}_{stamp_error}_attempt{attempt}.png")
+                for attempt in range(1, retries + 1):
                     try:
-                        await page.screenshot(path=error_screenshot_path, full_page=True)
-                        logging.error(f"Error screenshot saved to {error_screenshot_path}")
-                    except Exception as se:
-                        logging.error(f"Failed to capture error screenshot for {name}: {se}")
-                
-                result_message = f"❌ {name}: Failed after {attempt} attempts. Last error: {e}"
-                if app: # Ensure app exists before updating UI
-                    app.after(0, update_dashboard_status_ui, name, f"Failed (Attempt {attempt})")
+                        page = await context.new_page() # Create a new page for each attempt
+                        logging.info(f"Navigating to {name} ({url}) (Attempt {attempt}/{retries})")
+                        if app:
+                            app.after(0, update_dashboard_status_ui, name, f"Loading ({attempt}/{retries})...")
+                        
+                        await page.goto(url, wait_until="load", timeout=SPLUNK_WAIT_TIMEOUT_MS)
 
-                if attempt < retries:
-                    logging.info(f"Retrying {name} in 5 seconds...")
-                    await asyncio.sleep(5) # Wait before retrying
-                else:
-                    return result_message # All retries exhausted
+                        # Check for login page first
+                        if await page.query_selector('input[placeholder="Username"]'):
+                            logging.info("Splunk login page detected for %s.", name)
+                            if not session["username"] or not session["password"]:
+                                raise RuntimeError("Login required but credentials not set. Please set them via Settings -> Manage Credentials.")
+                            
+                            if app:
+                                app.after(0, update_dashboard_status_ui, name, "Logging in...")
+                            await page.fill('input[placeholder="Username"]', session["username"])
+                            await page.fill('input[placeholder="Password"]', session["password"])
+                            
+                            await page.press('input[placeholder="Password"]', "Enter")
+                            logging.info("Attempted login for %s, waiting for navigation...", name)
+                            
+                            await page.wait_for_url(url, wait_until="domcontentloaded", timeout=SPLUNK_WAIT_TIMEOUT_MS) 
+                            
+                            await asyncio.sleep(2) 
+                            
+                            if app:
+                                app.after(0, update_dashboard_status_ui, name, "Waiting for panels (logged in)...")
+                            await _wait_for_splunk_dashboard_to_load(page, SPLUNK_WAIT_TIMEOUT_MS)
+                            logging.info("Splunk dashboard loaded after login for %s.", name)
 
-            finally:
-                if context:
-                    await context.close()
-                if browser:
-                    await browser.close()
-                logging.info(f"Browser closed for {name}")
+                        else:
+                            logging.info("No login page detected for %s, proceeding with dashboard load wait.", name)
+                            if app:
+                                app.after(0, update_dashboard_status_ui, name, "Waiting for panels...")
+                            await _wait_for_splunk_dashboard_to_load(page, SPLUNK_WAIT_TIMEOUT_MS)
+
+                        # Take screenshot after ensuring the dashboard is fully loaded
+                        safe_filename = sanitize_filename(url)
+                        stamp = datetime.now(est).strftime("%Y%m%d_%H%M%S")
+                        screenshot_path = os.path.join(SCREENSHOT_DIR, f"screenshot_{safe_filename}_{stamp}.png")
+                        
+                        logging.info(f"Taking screenshot of {name} at {screenshot_path}")
+                        if app:
+                            app.after(0, update_dashboard_status_ui, name, "Taking screenshot...")
+                        await page.screenshot(path=screenshot_path, full_page=True)
+                        result_message = f"✅ {name} ({start} to {end}): Screenshot -> {screenshot_path}"
+                        if app:
+                            app.after(0, update_dashboard_status_ui, name, "Success")
+                        
+                        # Close the page explicitly after successful use
+                        if page:
+                            await page.close()
+                        return result_message # Success, exit function
+                        
+                    except Exception as e:
+                        error_msg = f"Error during page operations for {name} ({url}) (Attempt {attempt}/{retries}): {e}"
+                        logging.error(error_msg)
+                        
+                        # Capture a screenshot on error for debugging, if page object exists
+                        if page:
+                            stamp_error = datetime.now(est).strftime("%Y%m%d_%H%M%S")
+                            error_screenshot_path = os.path.join(SCREENSHOT_DIR, f"error_screenshot_{sanitize_filename(url)}_{stamp_error}_attempt{attempt}.png")
+                            try:
+                                await page.screenshot(path=error_screenshot_path, full_page=True)
+                                logging.error(f"Error screenshot saved to {error_screenshot_path}")
+                            except Exception as se:
+                                logging.error(f"Failed to capture error screenshot for {name}: {se}")
+                        
+                        result_message = f"❌ {name}: Failed after {attempt} attempts. Last error: {e}"
+                        if app:
+                            app.after(0, update_dashboard_status_ui, name, f"Failed (Attempt {attempt})")
+
+                        # Close the page before retrying with a new page
+                        if page:
+                            await page.close()
+
+                        if attempt < retries:
+                            logging.info(f"Retrying {name} in 5 seconds...")
+                            await asyncio.sleep(5) # Wait before retrying
+                        else:
+                            return result_message # All retries exhausted, exit function
+
+        finally: # This finally ensures browser and context are closed after ALL attempts
+            if context:
+                await context.close()
+            if browser:
+                await browser.close()
+            logging.info(f"Browser closed for {name}")
+
     return result_message # Should only be reached if all retries fail
 
 
