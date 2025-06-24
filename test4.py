@@ -14,7 +14,7 @@ import tkinter as tk
 from tkinter import ttk, simpledialog, messagebox, scrolledtext
 from tkcalendar import DateEntry
 
-from playwright.async_api import async_playwright, BrowserContext, Page
+from playwright.async_api import async_playwright, Playwright, BrowserContext, Page
 from dotenv import load_dotenv
 import pytz
 
@@ -48,15 +48,6 @@ except Exception as e:
 # ------------------------------------------------------------------------------
 # Global Variables & Session Setup
 # ------------------------------------------------------------------------------
-scheduled = False
-schedule_interval = 0  # in seconds
-
-# UI elements that need to be globally accessible
-app = None
-progress_bar = None
-treeview = None
-group_filter = None
-
 # Credentials are not loaded from .env at startup if .secrets is missing,
 # but can be set via the UI and stored in session cache.
 USERNAME = os.getenv("SPLUNK_USERNAME")
@@ -75,15 +66,16 @@ est = pytz.timezone("America/New_York")
 SCREENSHOT_DIR = os.path.join("screenshots", datetime.now(est).strftime("%Y-%m-%d"))
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
-# For scheduled runs - Declare global variables
-scheduled = False
-schedule_interval = 0  # in seconds
-
-# UI elements that need to be globally accessible before their full initialization
+# Global variables for UI elements, initialized to None.
+# These will be assigned their actual Tkinter objects later in the script.
 app = None
 progress_bar = None
 treeview = None
 group_filter = None
+
+# For scheduled runs - Declare global variables
+scheduled = False
+schedule_interval = 0  # in seconds
 
 # Define a default wait timeout for Splunk operations
 SPLUNK_WAIT_TIMEOUT_MS = 120000 # Increased to 120 seconds for more robustness
@@ -202,10 +194,10 @@ def add_dashboard():
     logging.info(f"Added dashboard: {name} (URL: {url}, Group: {group})")
 
 def delete_dashboard():
+    # Added check to ensure treeview is initialized before use
     if treeview is None:
-        messagebox.showerror("Error", "Treeview not initialized")
+        messagebox.showerror("Error", "UI not fully initialized. Please restart the application.")
         return
-        
     selected_items_ids = treeview.selection()
     if not selected_items_ids:
         messagebox.showinfo("Delete Dashboard", "Select dashboards to delete.")
@@ -214,8 +206,6 @@ def delete_dashboard():
         return
     
     names_to_delete = []
-    # Get the actual dashboard objects based on the treeview iid (which is its index in session["dashboards"])
-    # This is more robust than relying on values which might be truncated or reformatted.
     indices_to_delete = sorted([int(item_id) for item_id in selected_items_ids], reverse=True)
 
     for idx in indices_to_delete:
@@ -230,9 +220,11 @@ def delete_dashboard():
 
 
 def refresh_dashboard_list():
+    # Added check to ensure treeview is initialized before use
     if treeview is None:
+        logging.error("refresh_dashboard_list called before treeview is initialized.")
         return
-        
+    
     for i in treeview.get_children():
         treeview.delete(i)
     
@@ -246,9 +238,8 @@ def refresh_dashboard_list():
                             values=(checkbox_state, dashboard["name"], dashboard["url"], group_name, status))
 
 def toggle_selection(event):
-    if treeview is None:
+    if treeview is None: # Safety check
         return
-        
     item_id = treeview.identify_row(event.y)
     if not item_id:
         return
@@ -280,9 +271,11 @@ def deselect_all_dashboards():
     logging.info("Deselected all dashboards.")
 
 def update_group_filter():
+    # Added check to ensure group_filter is initialized before use
     if group_filter is None:
+        logging.error("update_group_filter called before group_filter is initialized.")
         return
-        
+
     groups = {"All"}
     for d in session["dashboards"]:
         groups.add(d.get("group", "Default"))
@@ -298,9 +291,11 @@ def get_selected_dashboards():
 
 def update_dashboard_status_ui(dashboard_name, status_message):
     """Updates the status column for a specific dashboard in the Treeview."""
+    # Added check to ensure treeview is initialized before use
     if treeview is None:
+        logging.error(f"update_dashboard_status_ui called before treeview is initialized for {dashboard_name}.")
         return
-        
+
     for idx, dashboard in enumerate(session["dashboards"]):
         if dashboard["name"] == dashboard_name:
             dashboard["status"] = status_message
@@ -321,6 +316,11 @@ def get_time_range():
     Displays a pop-up to choose the time range in EST.
     Users can choose from several relative options or select "Custom Absolute".
     """
+    # Added check to ensure app is initialized before Toplevel is created
+    if app is None:
+        messagebox.showerror("Error", "Application not fully initialized. Cannot open time range dialog.")
+        return None, None
+        
     popup = tk.Toplevel(app)
     result = {}
     popup.title("Select Time Range (EST)")
@@ -405,7 +405,7 @@ def get_time_range():
         except Exception as e:
             messagebox.showerror("Input Error", str(e))
     
-    tk.Button(popup, text="Submit", command=submit).grid(row=4, column=0, columnspan=2, pady=10) # Adjusted row
+    tk.Button(popup, text="Submit", command=submit).grid(row=4, column=0, columnspan=2, pady=10)
     popup.grab_set()
     popup.wait_window()
     return result.get("start"), result.get("end")
@@ -414,7 +414,7 @@ def get_time_range():
 # Scheduled Analysis Functionality
 # ------------------------------------------------------------------------------
 def schedule_analysis():
-    global scheduled, schedule_interval # Declare global for assignment
+    global scheduled, schedule_interval 
 
     if scheduled:
         messagebox.showinfo("Scheduled", "Analysis is already scheduled. Please cancel it first.")
@@ -436,15 +436,19 @@ def schedule_analysis():
     logging.info("Scheduled analysis every %s seconds. Starting first run.", interval)
     
     # Start the first scheduled analysis run, using app.after to stay on main thread
-    app.after(0, run_scheduled_analysis)
+    # Ensure app is initialized before calling app.after
+    if app:
+        app.after(0, run_scheduled_analysis)
+    else:
+        logging.error("Cannot schedule analysis: Tkinter app is not initialized.")
+        messagebox.showerror("Error", "Application not fully initialized. Cannot schedule analysis.")
+
 
 def _run_scheduled_analysis_background():
     """
     This function runs in a background thread and performs the actual scheduled analysis.
     It does not interact with the GUI directly (except via app.after for updates).
     """
-    # Define the time range for scheduled runs directly here or load from config
-    # For example, "Last 4 Hours EST"
     now_est = datetime.now(est)
     start = (now_est - timedelta(hours=4)).strftime("%Y-%m-%d %H:%M")
     end = now_est.strftime("%Y-%m-%d %H:%M")
@@ -457,9 +461,14 @@ def _run_scheduled_analysis_background():
     # Update GUI elements using app.after (important for thread safety)
     # Reset status of selected dashboards before starting
     for db in selected_dashboards:
-        app.after(0, update_dashboard_status_ui, db["name"], "Pending...")
-        
-    app.after(0, lambda: progress_bar.config(maximum=len(selected_dashboards), value=0))
+        # Check if app exists before calling app.after
+        if app:
+            app.after(0, update_dashboard_status_ui, db["name"], "Pending...")
+    
+    if app and progress_bar: # Check if app and progress_bar exist
+        app.after(0, lambda: progress_bar.config(maximum=len(selected_dashboards), value=0))
+    else:
+        logging.warning("Could not update progress bar for scheduled analysis: UI elements not ready.")
 
     selected_dashboard_data = [{"url": d["url"], "name": d["name"]} for d in selected_dashboards]
     logging.info(f"Initiating scheduled analysis for {len(selected_dashboard_data)} dashboards from {start} to {end}")
@@ -472,7 +481,7 @@ def run_scheduled_analysis():
     Manages the scheduling loop. This function is called by app.after.
     It kicks off the background analysis and then reschedules itself.
     """
-    global scheduled # Ensure we're using the global variable
+    global scheduled 
 
     if not scheduled:
         logging.info("Scheduled analysis loop terminated.")
@@ -483,10 +492,12 @@ def run_scheduled_analysis():
     Thread(target=_run_scheduled_analysis_background, daemon=True).start()
     
     # Schedule the next run on the main thread
-    app.after(schedule_interval * 1000, run_scheduled_analysis)
+    if app: # Ensure app is initialized before scheduling next run
+        app.after(schedule_interval * 1000, run_scheduled_analysis)
+
 
 def cancel_scheduled_analysis():
-    global scheduled # Declare global for assignment
+    global scheduled 
     if not scheduled:
         messagebox.showinfo("Scheduled", "No analysis is currently scheduled.")
         return
@@ -518,11 +529,17 @@ def analyze_selected():
     
     # Update status to "Pending" for selected dashboards before analysis
     for db in selected_dashboards:
-        app.after(0, update_dashboard_status_ui, db["name"], "Pending...")
+        if app: # Ensure app is initialized before calling app.after
+            app.after(0, update_dashboard_status_ui, db["name"], "Pending...")
 
     selected_dashboard_data = [{"url": d["url"], "name": d["name"]} for d in selected_dashboards]
-    progress_bar['maximum'] = len(selected_dashboard_data)
-    progress_bar['value'] = 0
+    
+    if progress_bar: # Ensure progress_bar is initialized before use
+        progress_bar['maximum'] = len(selected_dashboard_data)
+        progress_bar['value'] = 0
+    else:
+        logging.warning("Progress bar not initialized. Cannot update progress.")
+
     logging.info(f"Starting manual analysis for {len(selected_dashboard_data)} dashboards from {start} to {end}")
     
     # Run the asyncio logic in a separate thread to prevent blocking the Tkinter GUI
@@ -623,7 +640,7 @@ async def _wait_for_splunk_dashboard_to_load(page: Page, timeout_ms: int = SPLUN
                         allPanelsLoaded = false;
                         panelsWithDisabledExport.push("Panel with disabled export button: " + (panel.querySelector('.panel-title, .viz-title')?.innerText || 'No Title'));
                     } else if (exportButton && exportButton.offsetParent === null) {
-                        # Button exists but not visible (e.g., hidden by CSS, not fully rendered)
+                        // Button exists but not visible (e.g., hidden by CSS, not fully rendered)
                         allPanelsLoaded = false;
                         panelsWithDisabledExport.push("Panel with non-visible export button: " + (panel.querySelector('.panel-title, .viz-title')?.innerText || 'No Title'));
                     }
@@ -670,25 +687,28 @@ async def visit_dashboard(dashboard_data, start, end):
     """
     url = dashboard_data["url"]
     name = dashboard_data["name"]
-    retries = 2 # Reduced retries, relying more on robust wait
+    retries = 2
     result_message = ""
+    # Ensure app is initialized before calling app.after
+    if app:
+        app.after(0, update_dashboard_status_ui, name, "In Progress...")
+    else:
+        logging.warning(f"App not initialized, cannot update UI status for {name}.")
 
-    # Update UI status - always use app.after for GUI updates from background threads
-    app.after(0, update_dashboard_status_ui, name, "In Progress...")
 
-    async with browser_semaphore: # Acquire a slot from the semaphore
+    async with browser_semaphore:
         for attempt in range(1, retries + 1):
             browser = None
             context = None
             page = None
             try:
                 async with async_playwright() as p:
-                    # Headless is generally better for automated tasks
-                    browser = await p.chromium.launch(headless=True) 
-                    context = await browser.new_context() 
+                    browser = await p.chromium.launch(headless=True)
+                    context = await browser.new_context()
                     page = await context.new_page()
                     logging.info(f"Navigating to {name} ({url}) (Attempt {attempt}/{retries})")
-                    app.after(0, update_dashboard_status_ui, name, f"Loading ({attempt}/{retries})...")
+                    if app: # Ensure app exists before updating UI
+                        app.after(0, update_dashboard_status_ui, name, f"Loading ({attempt}/{retries})...")
                     
                     await page.goto(url, wait_until="load", timeout=SPLUNK_WAIT_TIMEOUT_MS)
 
@@ -698,7 +718,8 @@ async def visit_dashboard(dashboard_data, start, end):
                         if not session["username"] or not session["password"]:
                             raise RuntimeError("Login required but credentials not set. Please set them via Settings -> Manage Credentials.")
                         
-                        app.after(0, update_dashboard_status_ui, name, "Logging in...")
+                        if app: # Ensure app exists before updating UI
+                            app.after(0, update_dashboard_status_ui, name, "Logging in...")
                         await page.fill('input[placeholder="Username"]', session["username"])
                         await page.fill('input[placeholder="Password"]', session["password"])
                         
@@ -712,13 +733,15 @@ async def visit_dashboard(dashboard_data, start, end):
                         # Small pause before intelligent wait to allow elements to render after navigation
                         await asyncio.sleep(2) 
                         
-                        app.after(0, update_dashboard_status_ui, name, "Waiting for panels (logged in)...")
+                        if app: # Ensure app exists before updating UI
+                            app.after(0, update_dashboard_status_ui, name, "Waiting for panels (logged in)...")
                         await _wait_for_splunk_dashboard_to_load(page, SPLUNK_WAIT_TIMEOUT_MS)
                         logging.info("Splunk dashboard loaded after login for %s.", name)
 
                     else:
                         logging.info("No login page detected for %s, proceeding with dashboard load wait.", name)
-                        app.after(0, update_dashboard_status_ui, name, "Waiting for panels...")
+                        if app: # Ensure app exists before updating UI
+                            app.after(0, update_dashboard_status_ui, name, "Waiting for panels...")
                         await _wait_for_splunk_dashboard_to_load(page, SPLUNK_WAIT_TIMEOUT_MS)
 
                     # Take screenshot after ensuring the dashboard is fully loaded
@@ -727,10 +750,12 @@ async def visit_dashboard(dashboard_data, start, end):
                     screenshot_path = os.path.join(SCREENSHOT_DIR, f"screenshot_{safe_filename}_{stamp}.png")
                     
                     logging.info(f"Taking screenshot of {name} at {screenshot_path}")
-                    app.after(0, update_dashboard_status_ui, name, "Taking screenshot...")
+                    if app: # Ensure app exists before updating UI
+                        app.after(0, update_dashboard_status_ui, name, "Taking screenshot...")
                     await page.screenshot(path=screenshot_path, full_page=True)
                     result_message = f"✅ {name} ({start} to {end}): Screenshot -> {screenshot_path}"
-                    app.after(0, update_dashboard_status_ui, name, "Success")
+                    if app: # Ensure app exists before updating UI
+                        app.after(0, update_dashboard_status_ui, name, "Success")
                     return result_message # Success, break out of retry loop
 
             except Exception as e:
@@ -739,7 +764,6 @@ async def visit_dashboard(dashboard_data, start, end):
                 
                 # Capture a screenshot on error for debugging, if page object exists
                 if page:
-                    # Ensure stamp is defined even if initial navigation fails
                     stamp_error = datetime.now(est).strftime("%Y%m%d_%H%M%S")
                     error_screenshot_path = os.path.join(SCREENSHOT_DIR, f"error_screenshot_{sanitize_filename(url)}_{stamp_error}_attempt{attempt}.png")
                     try:
@@ -749,7 +773,8 @@ async def visit_dashboard(dashboard_data, start, end):
                         logging.error(f"Failed to capture error screenshot for {name}: {se}")
                 
                 result_message = f"❌ {name}: Failed after {attempt} attempts. Last error: {e}"
-                app.after(0, update_dashboard_status_ui, name, f"Failed (Attempt {attempt})")
+                if app: # Ensure app exists before updating UI
+                    app.after(0, update_dashboard_status_ui, name, f"Failed (Attempt {attempt})")
 
                 if attempt < retries:
                     logging.info(f"Retrying {name} in 5 seconds...")
@@ -782,14 +807,22 @@ async def analyze_dashboards_async(dashboards_data, start, end):
         results.append(result)
         completed += 1
         # Update the progress bar on the main thread
-        app.after(0, lambda c=completed: progress_bar.config(value=c))
+        if app and progress_bar: # Ensure app and progress_bar exist before updating UI
+            app.after(0, lambda c=completed: progress_bar.config(value=c))
         logging.info(f"Completed {completed}/{len(dashboards_data)} dashboards.")
     
     logging.info("All dashboard analyses completed.")
-    app.after(0, lambda: show_results(results, start, end)) # Show final results
+    if app: # Ensure app exists before showing results
+        app.after(0, lambda: show_results(results, start, end)) # Show final results
 
 
 def show_results(messages, start, end):
+    # Ensure app is initialized before Toplevel is created
+    if app is None:
+        logging.error("Cannot show results: Tkinter app is not initialized.")
+        messagebox.showerror("Error", "Application not fully initialized. Cannot show results.")
+        return
+
     win = tk.Toplevel(app)
     win.title("Analysis Summary")
     out = scrolledtext.ScrolledText(win, wrap=tk.WORD, width=80, height=25)
@@ -823,76 +856,76 @@ def show_results(messages, start, end):
 # Main Application UI Setup
 # ------------------------------------------------------------------------------
 
-app = tk.Tk()
-app.title("Splunk Dashboard Desktop Client")
-app.geometry("1000x700") # Increased window size for Treeview and new column
+# It's good practice to encapsulate the UI setup in a function to control execution order.
+def setup_ui():
+    global app, progress_bar, treeview, group_filter # Declare globals to assign to them
 
-# Menu for Settings.
-menu_bar = tk.Menu(app)
-settings_menu = tk.Menu(menu_bar, tearoff=0)
-settings_menu.add_command(label="Manage Credentials", command=manage_credentials)
-menu_bar.add_cascade(label="Settings", menu=settings_menu)
-app.config(menu=menu_bar)
+    app = tk.Tk()
+    app.title("Splunk Dashboard Desktop Client")
+    app.geometry("1000x700")
 
-# Control frame (buttons and group filter).
-control_frame = tk.Frame(app)
-control_frame.pack(pady=10)
+    menu_bar = tk.Menu(app)
+    settings_menu = tk.Menu(menu_bar, tearoff=0)
+    settings_menu.add_command(label="Manage Credentials", command=manage_credentials)
+    menu_bar.add_cascade(label="Settings", menu=settings_menu)
+    app.config(menu=menu_bar)
 
-tk.Button(control_frame, text="Add Dashboard", command=add_dashboard).grid(row=0, column=0, padx=5)
-tk.Button(control_frame, text="Delete Dashboard", command=delete_dashboard).grid(row=0, column=1, padx=5)
-tk.Button(control_frame, text="Analyze Selected", command=analyze_selected).grid(row=0, column=2, padx=5)
-tk.Button(control_frame, text="Schedule Analysis", command=schedule_analysis).grid(row=0, column=3, padx=5)
-tk.Button(control_frame, text="Cancel Scheduled Analysis", command=cancel_scheduled_analysis).grid(row=0, column=4, padx=5)
+    control_frame = tk.Frame(app)
+    control_frame.pack(pady=10)
 
-# Group filter and select/deselect all buttons
-filter_select_frame = tk.Frame(app)
-filter_select_frame.pack(pady=5, fill=tk.X, padx=10)
+    tk.Button(control_frame, text="Add Dashboard", command=add_dashboard).grid(row=0, column=0, padx=5)
+    tk.Button(control_frame, text="Delete Dashboard", command=delete_dashboard).grid(row=0, column=1, padx=5)
+    tk.Button(control_frame, text="Analyze Selected", command=analyze_selected).grid(row=0, column=2, padx=5)
+    tk.Button(control_frame, text="Schedule Analysis", command=schedule_analysis).grid(row=0, column=3, padx=5)
+    tk.Button(control_frame, text="Cancel Scheduled Analysis", command=cancel_scheduled_analysis).grid(row=0, column=4, padx=5)
 
-tk.Label(filter_select_frame, text="Filter by Group:").pack(side=tk.LEFT, padx=5)
-group_filter = ttk.Combobox(filter_select_frame, state="readonly", width=15)
-group_filter.pack(side=tk.LEFT, padx=5)
-group_filter.bind("<<ComboboxSelected>>", lambda e: refresh_dashboard_list())
+    filter_select_frame = tk.Frame(app)
+    filter_select_frame.pack(pady=5, fill=tk.X, padx=10)
 
-# Dashboard list (using Treeview for checkboxes and status)
-tk.Label(app, text="Saved Dashboards: (Click on checkbox column to select)").pack(pady=(10,0))
-treeview_frame = tk.Frame(app)
-treeview_frame.pack(pady=5, fill=tk.BOTH, expand=True, padx=10)
+    tk.Label(filter_select_frame, text="Filter by Group:").pack(side=tk.LEFT, padx=5)
+    group_filter = ttk.Combobox(filter_select_frame, state="readonly", width=15)
+    group_filter.pack(side=tk.LEFT, padx=5)
+    group_filter.bind("<<ComboboxSelected>>", lambda e: refresh_dashboard_list())
+    # update_group_filter will be called after refresh_dashboard_list below
 
-# Define columns and headings
-columns = ("Selected", "Name", "URL", "Group", "Status")
-treeview = ttk.Treeview(treeview_frame, columns=columns, show="headings") # <--- Assign to global treeview
+    tk.Button(filter_select_frame, text="Select All", command=select_all_dashboards).pack(side=tk.LEFT, padx=15)
+    tk.Button(filter_select_frame, text="Deselect All", command=deselect_all_dashboards).pack(side=tk.LEFT, padx=5)
 
-# Configure treeview columns
-treeview.heading("Selected", text="Selected", anchor=tk.CENTER)
-treeview.heading("Name", text="Name")
-treeview.heading("URL", text="URL")
-treeview.heading("Group", text="Group")
-treeview.heading("Status", text="Status")
+    tk.Label(app, text="Saved Dashboards: (Click on checkbox column to select)").pack(pady=(10,0))
+    treeview_frame = tk.Frame(app)
+    treeview_frame.pack(pady=5, fill=tk.BOTH, expand=True, padx=10)
 
-# Set column widths and alignment
-treeview.column("Selected", width=60, anchor=tk.CENTER, stretch=False)
-treeview.column("Name", width=150, stretch=True)
-treeview.column("URL", width=300, stretch=True)
-treeview.column("Group", width=100, stretch=True)
-treeview.column("Status", width=150, stretch=True)
+    columns = ("Selected", "Name", "URL", "Group", "Status")
+    treeview = ttk.Treeview(treeview_frame, columns=columns, show="headings")
 
-# Bind the click event to the treeview to handle checkbox toggling
-treeview.bind("<Button-1>", toggle_selection)
+    treeview.heading("Selected", text="☑", anchor=tk.CENTER)
+    treeview.column("Selected", width=40, anchor=tk.CENTER, stretch=tk.NO)
+    treeview.heading("Name", text="Dashboard Name")
+    treeview.column("Name", width=200, stretch=tk.YES)
+    treeview.heading("URL", text="URL")
+    treeview.column("URL", width=350, stretch=tk.YES)
+    treeview.heading("Group", text="Group")
+    treeview.column("Group", width=100, stretch=tk.YES)
+    treeview.heading("Status", text="Status")
+    treeview.column("Status", width=120, stretch=tk.NO)
 
-treeview.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    treeview.bind("<Button-1>", toggle_selection)
+    treeview.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-# Add a scrollbar to the treeview
-treeview_scrollbar = ttk.Scrollbar(treeview_frame, orient="vertical", command=treeview.yview)
-treeview.configure(yscrollcommand=treeview_scrollbar.set)
-treeview_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    treeview_scrollbar = ttk.Scrollbar(treeview_frame, orient="vertical", command=treeview.yview)
+    treeview.configure(yscrollcommand=treeview_scrollbar.set)
+    treeview_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-# Progress bar for analysis.
-progress_bar = ttk.Progressbar(app, orient="horizontal", mode="determinate", length=600) # <--- Assign to global progress_bar
-progress_bar.pack(pady=20)
+    progress_bar = ttk.Progressbar(app, orient="horizontal", mode="determinate", length=600)
+    progress_bar.pack(pady=20)
 
-# Now load the dashboards and update the UI
-load_dashboards()
-update_group_filter()
-refresh_dashboard_list()
+    # Initialize dashboards AFTER UI elements are created
+    load_dashboards() 
+    # Refresh the list AFTER treeview and group_filter are established
+    refresh_dashboard_list()
+    update_group_filter() # Ensure filter options are populated after dashboards are loaded
 
-app.mainloop()
+# Call the UI setup function and then start the main loop
+if __name__ == "__main__":
+    setup_ui()
+    app.mainloop()
