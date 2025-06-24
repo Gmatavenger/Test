@@ -556,12 +556,37 @@ async def visit_dashboard(url, start, end):
                 return f"❌ {url}: Failed after {retries} attempts. Last error: {e}"
             logging.info(f"Retrying {url} in 5 seconds...") # Increased retry wait
             await asyncio.sleep(5) # Wait before retrying
-        finally:
-            if context:
-                await context.close()
-            if browser:
-                await browser.close()
-            logging.info(f"Browser closed for {url}")
+         finally:
+            try:
+                if context:
+                    await context.close()
+            except Exception as e:
+                logging.warning(f"Error closing context: {e}")
+            try:
+                if browser:
+                    await browser.close()
+            except Exception as e:
+                logging.warning(f"Error closing browser: {e}")
+            logging.info(f"Browser cleanup done for {url}")
+
+# around screenshot call, update this block
+                # Take screenshot after ensuring the dashboard is fully loaded
+                safe_filename = sanitize_filename(url)
+                stamp = datetime.now(est).strftime("%Y%m%d_%H%M%S")
+                screenshot_path = os.path.join(SCREENSHOT_DIR, f"screenshot_{safe_filename}_{stamp}.png")
+
+                try:
+                    if page.is_closed():
+                        logging.warning("Page was already closed before screenshot.")
+                        return f"⚠️ {url}: Page closed before screenshot"
+                    logging.info(f"Taking screenshot of {url} at {screenshot_path}")
+                    await page.screenshot(path=screenshot_path, full_page=True)
+                except Exception as e:
+                    logging.error(f"Failed to take screenshot: {e}")
+                    return f"❌ {url}: Screenshot failed. Error: {e}"
+
+                return f"✅ {url} ({start} to {end}): Screenshot -> {screenshot_path}"
+...
 
 
 async def analyze_dashboards_async(urls, start, end):
