@@ -100,6 +100,11 @@ class TimeRangeDialog(tk.Toplevel):
         self.result = {}
         self.est = pytz.timezone("America/New_York")
         
+        # Make dialog modal
+        self.transient(parent)
+        self.grab_set()
+        self.focus_set()
+        
         # Main layout
         main_frame = ttk.Frame(self, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -150,6 +155,9 @@ class TimeRangeDialog(tk.Toplevel):
         
         # Show initial frame
         self.show_selected_frame()
+        
+        # Handle window close
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
     
     def show_selected_frame(self):
         # Hide all frames
@@ -805,43 +813,71 @@ class SplunkAutomatorApp:
         """Intelligently waits for Splunk dashboard panels to fully load."""
         logging.info(f"Waiting for dashboard elements to load...")
         
+        # Wait for the main dashboard container
         await page.wait_for_selector("div.dashboard-body, splunk-dashboard-view", timeout=SPLUNK_WAIT_TIMEOUT_MS)
-        await page.wait_for_selector("div.dashboard-panel, splunk-dashboard-panel", state="visible", timeout=SPLUNK_WAIT_TIMEOUT_MS)
-
-        # Click submit button if it exists and is needed
-        try:
-            submit_button = page.locator('button:has-text("Submit"), button:has-text("Apply")').first
-            if await submit_button.is_enabled(timeout=5000):
-                logging.info("Found 'Submit' button, clicking it.")
-                await submit_button.click()
-                await page.wait_for_load_state('networkidle', timeout=SPLUNK_WAIT_TIMEOUT_MS / 2)
-        except Exception:
+        
+        # Check if we need to click a submit button
+        submit_button = page.locator('button:has-text("Submit"), button:has-text("Apply")').first
+        if await submit_button.is_visible(timeout=5000) and await submit_button.is_enabled(timeout=5000):
+            logging.info("Found 'Submit' button, clicking it.")
+            await submit_button.click()
+            # Wait for the loading to start
+            await page.wait_for_load_state('networkidle', timeout=SPLUNK_WAIT_TIMEOUT_MS / 2)
+        else:
             logging.debug("No 'Submit' button found or needed.")
 
-        # Iteratively check that panels are not showing "loading" messages
-        loading_indicators = ["Waiting for data", "Loading...", "Searching..."]
+        # Wait for panels to appear
+        await page.wait_for_selector("div.dashboard-panel, splunk-dashboard-panel", state="visible", timeout=SPLUNK_WAIT_TIMEOUT_MS)
+
+        # Iteratively check that panels are not showing "loading" messages and export buttons are enabled
+        loading_indicators = ["Waiting for data", "Loading...", "Searching...", "Loading data", "Rendering"]
         start_wait = time.time()
+        iteration = 0
+        
         while time.time() - start_wait < (SPLUNK_WAIT_TIMEOUT_MS / 1000):
+            iteration += 1
             panels = await page.locator("div.dashboard-panel, splunk-dashboard-panel").all()
+            logging.info(f"Checking {len(panels)} panels for loading state (iteration {iteration})")
+            
             all_panels_loaded = True
-            for panel in panels:
+            for i, panel in enumerate(panels):
+                # Check for loading text
                 panel_text = await panel.inner_text()
                 if any(indicator in panel_text for indicator in loading_indicators):
+                    logging.info(f"Panel {i+1} has loading text: {panel_text[:50]}...")
                     all_panels_loaded = False
-                    break
-                # Check for enabled export button as a sign of readiness
+                    continue  # Continue checking other panels
+                
+                # Check for export button as a sign of readiness
                 export_button = panel.locator('button[aria-label*="Export"], a[aria-label*="Export"]').first
-                if await export_button.count() > 0 and not await export_button.is_enabled():
-                    all_panels_loaded = False
-                    break
+                if await export_button.count() > 0:
+                    if not await export_button.is_enabled():
+                        logging.info(f"Panel {i+1} has export button but it's disabled")
+                        all_panels_loaded = False
+                        continue
+                    else:
+                        logging.debug(f"Panel {i+1} export button is enabled")
+                else:
+                    # Fallback: Check for visual elements that indicate loading
+                    loading_spinner = panel.locator('.loading, .spinner, .waiting')
+                    if await loading_spinner.count() > 0 and await loading_spinner.is_visible():
+                        logging.info(f"Panel {i+1} has loading spinner")
+                        all_panels_loaded = False
+                        continue
             
             if all_panels_loaded:
                 logging.info("All dashboard panels appear to be loaded.")
-                await asyncio.sleep(2) # Final buffer for rendering
+                # Final wait to ensure everything is rendered
+                await asyncio.sleep(3)
                 return
             
-            await asyncio.sleep(1) # Wait before re-checking
+            # Wait before re-checking
+            await asyncio.sleep(2)
         
+        # If we get here, timeout occurred
+        logging.warning("Timed out waiting for all dashboard panels to finish loading.")
+        # Take a screenshot anyway for debugging
+        await page.screenshot(path=os.path.join(SCREENSHOT_DIR, f"timeout_{int(time.time())}.png"))
         raise TimeoutError("Timed out waiting for all dashboard panels to finish loading.")
 
 # ------------------------------------------------------------------------------
