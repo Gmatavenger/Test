@@ -687,13 +687,13 @@ class SplunkAutomatorApp:
     def format_time_for_url(self, base_url, start_dt, end_dt):
         params = {}
         if isinstance(start_dt, str):
-            params['form.time.earliest'] = start_dt
+            params['form.time_field.earliest'] = start_dt
         else:
-            params['form.time.earliest'] = int(start_dt.timestamp())
+            params['form.time_field.earliest'] = int(start_dt.timestamp())
         if isinstance(end_dt, str):
-            params['form.time.latest'] = end_dt
+            params['form.time_field.latest'] = end_dt
         else:
-            params['form.time.latest'] = int(end_dt.timestamp())
+            params['form.time_field.latest'] = int(end_dt.timestamp())
         full_url = f"{base_url.split('?')[0]}?{urlencode(params)}"
         logger.info(f"[LOG] Composed dashboard URL: {full_url}")
         return full_url
