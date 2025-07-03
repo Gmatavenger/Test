@@ -644,6 +644,8 @@ class SplunkAutomatorApp:
                 self.progress_bar.step(1)
                 self.update_progress(self.progress_bar['value'] + 1, self.progress_bar['maximum'])
 
+
+
     async def _wait_for_splunk_dashboard_to_load(self, page, name):
         self.update_dashboard_status(name, "Waiting for panels...")
         logger.info(f"[LOG] Dashboard '{name}' - Waiting for dashboard panels to load.")
@@ -651,39 +653,37 @@ class SplunkAutomatorApp:
             await page.wait_for_selector("div.dashboard-body, splunk-dashboard-view", timeout=120_000)
         except Exception:
             logger.warning(f"[LOG] Dashboard '{name}' - Dashboard body selector not found within timeout.")
-        submit_button = page.locator('button:has-text("Submit"), button:has-text("Apply")').first
-        if await submit_button.is_visible(timeout=5000) and await submit_button.is_enabled(timeout=5000):
-            self.update_dashboard_status(name, "Submitting query...")
-            logger.info(f"[LOG] Dashboard '{name}' - Submitting dashboard query.")
-            await submit_button.click()
-            await page.wait_for_load_state('networkidle', timeout=60_000)
-        try:
-            await page.wait_for_selector("div.dashboard-panel, splunk-dashboard-panel", state="visible", timeout=120_000)
-        except Exception:
-            logger.warning(f"[LOG] Dashboard '{name}' - Dashboard panel selector not visible within timeout.")
-        loading_indicators = ["Waiting for data", "Loading...", "Searching...", "Loading data", "Rendering"]
-        start_wait = time.time()
-        while time.time() - start_wait < 90:
-            panels = await page.locator("div.dashboard-panel, splunk-dashboard-panel").all()
-            loading_panels = 0
-            for panel in panels:
-                panel_text = await panel.inner_text()
-                if any(indicator in panel_text for indicator in loading_indicators):
-                    loading_panels += 1
-                    continue
-                export_button = panel.locator('button[aria-label*="Export"], a[aria-label*="Export"]').first
-                if await export_button.count() > 0 and not await export_button.is_enabled():
-                    loading_panels += 1
-            if loading_panels == 0:
-                logger.info(f"All panels for '{name}' appear loaded.")
-                await asyncio.sleep(2)
-                return
-            self.update_dashboard_status(name, f"Waiting... ({loading_panels} panels loading)")
-            logger.info(f"[LOG] Dashboard '{name}' - {loading_panels} panels still loading...")
-            await asyncio.sleep(3)
-        self.update_dashboard_status(name, "Warning: Timeout. Taking screenshot.")
-        logger.warning(f"Timed out waiting for dashboard '{name}' to load completely")
 
+        
+        try:
+            has_enabled_export_buttons = await page.evaluate("""() => {
+                const exportButtons = document.querySelectorAll('.btn-pill.export');
+                if (exportButtons.length === 0) return false;
+                const disabledButtons = document.querySelectorAll('.btn-pill.export.disabled');
+                return exportButtons.length > 0 && disabledButtons.length === 0;
+            }""")
+            if has_enabled_export_buttons:
+                logger.info(f"[LOG] Dashboard '{name}' - Export buttons already enabled, waiting 5 seconds for potential input state...")
+                self.update_dashboard_status(name, "Export enabled, waiting for input...")
+                await asyncio.sleep(5)
+        except Exception as e:
+            logger.warning(f"[LOG] Dashboard '{name}' - Error during export button initial check: {e}")
+
+        try:
+            self.update_dashboard_status(name, "Waiting for export buttons to be enabled...")
+            await page.wait_for_function("""() => {
+                const exportButtons = document.querySelectorAll('.btn-pill.export');
+                if (exportButtons.length === 0) return false;
+                const disabledButtons = document.querySelectorAll('.btn-pill.export.disabled');
+                const editExportButtons = document.querySelectorAll('a.btn.edit-export');
+                return disabledButtons.length === 0 && editExportButtons.length > 0;
+            }""", timeout=120_000)
+            logger.info(f"[LOG] Dashboard '{name}' - Export buttons enabled and edit-export button present.")
+        except Exception:
+            logger.warning(f"[LOG] Dashboard '{name}' - Export/edit-export button state not reached within timeout.")
+            self.update_dashboard_status(name, "Warning: Timeout waiting for export buttons.")
+
+    
     def format_time_for_url(self, base_url, start_dt, end_dt):
         params = {}
         if isinstance(start_dt, str):
