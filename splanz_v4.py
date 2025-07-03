@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 from threading import Thread
 import logging
 from logging.handlers import RotatingFileHandler
-import time
+import shutil
 import keyring
 
 try:
@@ -46,8 +46,48 @@ DASHBOARD_FILE = "dashboards.json"
 SCHEDULE_FILE = "schedule.json"
 SETTINGS_FILE = "settings.json"
 est = pytz.timezone("America/New_York")
-SCREENSHOT_DIR = "screenshots"
-os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+
+# Screenshot and tmp config
+TMP_DIR = "tmp"
+SCREENSHOT_ARCHIVE_DIR = "screenshots"
+DAYS_TO_KEEP = 3
+
+def ensure_dirs():
+    os.makedirs(TMP_DIR, exist_ok=True)
+    os.makedirs(SCREENSHOT_ARCHIVE_DIR, exist_ok=True)
+
+def purge_old_archives():
+    now = datetime.now()
+    for folder in os.listdir(SCREENSHOT_ARCHIVE_DIR):
+        folder_path = os.path.join(SCREENSHOT_ARCHIVE_DIR, folder)
+        if not os.path.isdir(folder_path):
+            continue
+        try:
+            folder_date = datetime.strptime(folder, "%Y-%m-%d")
+            if (now - folder_date).days > DAYS_TO_KEEP:
+                shutil.rmtree(folder_path)
+                logger.info(f"Purged old archive: {folder_path}")
+        except ValueError:
+            continue
+
+def move_screenshots_to_archive():
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    target_dir = os.path.join(SCREENSHOT_ARCHIVE_DIR, today_str)
+    os.makedirs(target_dir, exist_ok=True)
+    for fname in os.listdir(TMP_DIR):
+        src = os.path.join(TMP_DIR, fname)
+        dst = os.path.join(target_dir, fname)
+        if os.path.isfile(src):
+            shutil.move(src, dst)
+            logger.info(f"Moved screenshot {src} to {dst}")
+
+def save_screenshot_to_tmp(screenshot_bytes, filename):
+    ensure_dirs()
+    file_path = os.path.join(TMP_DIR, filename)
+    with open(file_path, "wb") as f:
+        f.write(screenshot_bytes)
+    logger.info(f"Saved screenshot to {file_path}")
+    return file_path
 
 # ------------------------------------------------------------------------------
 # Credential Management (SECURE)
@@ -230,7 +270,10 @@ class TimeRangeDialog(Toplevel):
             now = datetime.now(self.est)
             option = self.option_var.get()
             if option == "Relative":
-                amount = int(self.relative_amount.get())
+                amount_str = self.relative_amount.get()
+                if not amount_str.isdigit() or int(amount_str) < 1:
+                    raise ValueError("Relative amount must be a positive integer.")
+                amount = int(amount_str)
                 unit = self.relative_unit.get()
                 unit_map = {
                     "minutes": "m",
@@ -240,7 +283,9 @@ class TimeRangeDialog(Toplevel):
                     "months": "mon",
                     "years": "y",
                 }
-                splunk_unit = unit_map.get(unit, "h")
+                if unit not in unit_map:
+                    raise ValueError("Invalid unit selected.")
+                splunk_unit = unit_map[unit]
                 earliest = f"-{amount}{splunk_unit}"
                 self.result = {"start": earliest, "end": "now"}
             elif option == "Date Range":
@@ -248,6 +293,8 @@ class TimeRangeDialog(Toplevel):
                 end_date = self.end_date.get_date()
                 start = self.est.localize(datetime.combine(start_date, dt_time.min))
                 end = self.est.localize(datetime.combine(end_date, dt_time(23, 59, 59, 999999)))
+                if end < start:
+                    raise ValueError("End date cannot be before start date.")
                 self.result = {"start": start, "end": end}
             elif option == "Date & Time Range":
                 start_date = self.dt_start_date.get_date()
@@ -257,26 +304,37 @@ class TimeRangeDialog(Toplevel):
                 start = self.est.localize(datetime.combine(start_date, start_time))
                 end = self.est.localize(datetime.combine(end_date, end_time))
                 if end <= start:
-                    raise ValueError("End time must be after start time.")
+                    raise ValueError("Latest time must be after earliest time.")
                 self.result = {"start": start, "end": end}
             elif option == "Advanced":
-                earliest = int(self.earliest_epoch.get())
-                latest = int(self.latest_epoch.get())
+                earliest_str = self.earliest_epoch.get()
+                latest_str = self.latest_epoch.get()
+                if not earliest_str.isdigit() or not latest_str.isdigit():
+                    raise ValueError("Epoch values must be valid integer timestamps.")
+                earliest = int(earliest_str)
+                latest = int(latest_str)
                 start = datetime.fromtimestamp(earliest, tz=self.est)
                 end = datetime.fromtimestamp(latest, tz=self.est)
                 if end <= start:
-                    raise ValueError("End time must be after start time.")
+                    raise ValueError("Latest epoch must be after earliest epoch.")
                 self.result = {"start": start, "end": end}
             self.destroy()
         except Exception as e:
             messagebox.showerror("Input Error", f"Invalid time range: {e}", parent=self)
 
     def parse_time(self, time_str):
-        parts = time_str.split(':')
-        hour = int(parts[0])
-        minute = int(parts[1]) if len(parts) > 1 else 0
-        second = int(parts[2]) if len(parts) > 2 else 0
-        return dt_time(hour, minute, second)
+        try:
+            parts = time_str.strip().split(':')
+            if len(parts) not in (2, 3):
+                raise ValueError
+            hour = int(parts[0])
+            minute = int(parts[1])
+            second = int(parts[2]) if len(parts) == 3 else 0
+            if not (0 <= hour < 24 and 0 <= minute < 60 and 0 <= second < 60):
+                raise ValueError
+            return dt_time(hour, minute, second)
+        except Exception:
+            raise ValueError("Time must be in HH:MM or HH:MM:SS format and within valid time ranges.")
 
 # ------------------------------------------------------------------------------
 # Main Application Class and All Methods
@@ -286,7 +344,6 @@ class SplunkAutomatorApp:
         self.master = master
         master.title("Splunk Dashboard Automator")
         master.geometry(self.load_settings().get("geometry", "1200x800"))
-        self.concurrency_limit = self.load_settings().get("concurrency_limit", 3)
         self.status_message = tk.StringVar()
         self.last_group = self.load_settings().get("last_group", "All")
         self.last_selected_dashboards = self.load_settings().get("last_selected_dashboards", [])
@@ -307,7 +364,6 @@ class SplunkAutomatorApp:
         settings_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Settings", menu=settings_menu)
         settings_menu.add_command(label="Manage Credentials", command=self.manage_credentials)
-        settings_menu.add_command(label="Set Concurrency", command=self.set_concurrency)
         settings_menu.add_command(label="Export Results", command=self.export_results)
         schedule_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Schedule", menu=schedule_menu)
@@ -333,7 +389,7 @@ class SplunkAutomatorApp:
         main_frame.grid_rowconfigure(1, weight=1)
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
-        self.treeview = ttk.Treeview(tree_frame, columns=("Sel","Name","URL","Group","Status"), show="headings")
+        self.treeview = ttk.Treeview(tree_frame, columns=("Sel","Name","URL","Group","Status"), show="headings", selectmode="extended")
         for col, width in zip(("Sel","Name","URL","Group","Status"), (40,250,400,100,300)):
             self.treeview.heading(col, text=col)
             self.treeview.column(col, width=width)
@@ -346,11 +402,6 @@ class SplunkAutomatorApp:
         analysis_frame.grid(row=2, column=0, sticky="ew", pady=10)
         ttk.Button(analysis_frame, text="Analyze Selected", command=self.run_analysis_thread).pack(side=tk.LEFT, padx=5)
         ttk.Button(analysis_frame, text="Schedule Analysis", command=self.schedule_analysis).pack(side=tk.LEFT, padx=5)
-        ttk.Label(analysis_frame, text="Concurrency:").pack(side=tk.LEFT, padx=5)
-        self.concurrent_spin = tk.Spinbox(analysis_frame, from_=1, to=10, width=3, command=self.update_concurrency)
-        self.concurrent_spin.delete(0, tk.END)
-        self.concurrent_spin.insert(0, str(self.concurrency_limit))
-        self.concurrent_spin.pack(side=tk.LEFT)
         self.progress_bar = ttk.Progressbar(analysis_frame, orient="horizontal", mode="determinate")
         self.progress_bar.pack(fill=tk.X, expand=True, padx=20, side=tk.LEFT)
         status_frame = ttk.Frame(self.master)
@@ -415,31 +466,17 @@ class SplunkAutomatorApp:
         dlg.bind("<Escape>", lambda e: cancel())
         self.master.wait_window(dlg)
 
-    def set_concurrency(self):
-        answer = simpledialog.askinteger("Concurrency", "Set number of concurrent browsers (1-10):", initialvalue=self.concurrency_limit, minvalue=1, maxvalue=10)
-        if answer:
-            self.concurrency_limit = answer
-            self.concurrent_spin.delete(0, tk.END)
-            self.concurrent_spin.insert(0, str(answer))
-            self.save_settings()
-
-    def update_concurrency(self):
-        try:
-            val = int(self.concurrent_spin.get())
-            if 1 <= val <= 10:
-                self.concurrency_limit = val
-                self.save_settings()
-        except:
-            pass
-
     def add_dashboard(self):
         name = simpledialog.askstring("Input", "Enter dashboard name:")
-        if not name: return
+        if not name or not name.strip():
+            messagebox.showerror("Input Error", "Dashboard name cannot be empty.")
+            return
         url = simpledialog.askstring("Input", "Enter dashboard URL:")
-        if not url or not url.startswith("http"):
+        if not url or not url.strip() or not url.startswith("http"):
             messagebox.showerror("Invalid URL", "URL must start with http or https.")
             return
-        if any(d["name"].strip().lower() == name.strip().lower() for d in self.session["dashboards"]):
+        name_lower = name.strip().lower()
+        if any(d["name"].strip().lower() == name_lower for d in self.session["dashboards"]):
             messagebox.showerror("Duplicate", "Dashboard name already exists.")
             return
         group = simpledialog.askstring("Input", "Enter group name:", initialvalue="Default") or "Default"
@@ -455,38 +492,45 @@ class SplunkAutomatorApp:
         if messagebox.askyesno("Confirm Delete", "Delete selected dashboards?"):
             indices = sorted([int(iid) for iid in self.treeview.selection()], reverse=True)
             for index in indices:
-                del self.session['dashboards'][index]
+                if 0 <= index < len(self.session['dashboards']):
+                    del self.session['dashboards'][index]
             self.save_dashboards()
             self.refresh_dashboard_list()
             self.update_group_filter()
 
     def select_all_dashboards(self):
-        for db in self.session['dashboards']: db['selected'] = True
+        for db in self.session['dashboards']:
+            db['selected'] = True
         self.refresh_dashboard_list()
 
     def deselect_all_dashboards(self):
-        for db in self.session['dashboards']: db['selected'] = False
+        for db in self.session['dashboards']:
+            db['selected'] = False
         self.refresh_dashboard_list()
 
     def toggle_selection(self, event):
         item_id = self.treeview.identify_row(event.y)
-        if not item_id or self.treeview.identify_column(event.x) != "#1": return
-        db = self.session['dashboards'][int(item_id)]
-        db["selected"] = not db.get("selected", False)
-        self.refresh_dashboard_list()
+        if not item_id or self.treeview.identify_column(event.x) != "#1":
+            return
+        try:
+            db = self.session['dashboards'][int(item_id)]
+            db["selected"] = not db.get("selected", False)
+            self.refresh_dashboard_list()
+        except (IndexError, ValueError):
+            pass
 
     def load_dashboards(self):
         if os.path.exists(DASHBOARD_FILE):
             try:
-                with open(DASHBOARD_FILE, 'r') as f:
+                with open(DASHBOARD_FILE, 'r', encoding='utf-8') as f:
                     self.session['dashboards'] = json.load(f)
             except json.JSONDecodeError:
-                 messagebox.showerror("Load Error", f"{DASHBOARD_FILE} is corrupted.")
+                messagebox.showerror("Load Error", f"{DASHBOARD_FILE} is corrupted.")
         self.refresh_dashboard_list()
         self.update_group_filter()
 
     def save_dashboards(self):
-        with open(DASHBOARD_FILE, 'w') as f:
+        with open(DASHBOARD_FILE, 'w', encoding='utf-8') as f:
             dashboards_to_save = [{k: v for k, v in d.items() if k != 'status'} for d in self.session['dashboards']]
             json.dump(dashboards_to_save, f, indent=4)
 
@@ -520,9 +564,10 @@ class SplunkAutomatorApp:
             messagebox.showinfo("Nothing to export", "No dashboards loaded.")
             return
         file = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV","*.csv")])
-        if not file: return
+        if not file:
+            return
         import csv
-        with open(file, "w", newline='') as f:
+        with open(file, "w", newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow(["Name", "URL", "Group", "Status"])
             for db in self.session['dashboards']:
@@ -532,7 +577,7 @@ class SplunkAutomatorApp:
     def load_settings(self):
         if os.path.exists(SETTINGS_FILE):
             try:
-                with open(SETTINGS_FILE, "r") as f:
+                with open(SETTINGS_FILE, "r", encoding='utf-8') as f:
                     return json.load(f)
             except Exception:
                 return {}
@@ -541,11 +586,10 @@ class SplunkAutomatorApp:
     def save_settings(self):
         settings = {
             "geometry": self.master.geometry(),
-            "concurrency_limit": self.concurrency_limit,
             "last_group": self.group_filter_var.get(),
             "last_selected_dashboards": [d['name'] for d in self.session['dashboards'] if d.get('selected')]
         }
-        with open(SETTINGS_FILE, "w") as f:
+        with open(SETTINGS_FILE, "w", encoding='utf-8') as f:
             json.dump(settings, f, indent=4)
 
     def run_analysis_thread(self, scheduled_run=False, schedule_config=None):
@@ -571,78 +615,84 @@ class SplunkAutomatorApp:
         Thread(target=lambda: asyncio.run(self.analyze_dashboards_async(selected_dbs, start_dt, end_dt)), daemon=True).start()
 
     async def analyze_dashboards_async(self, dashboards, start_dt, end_dt):
-        logger.info(f"[LOG] Starting async analysis for {len(dashboards)} dashboards.")
-        semaphore = asyncio.Semaphore(self.concurrency_limit)
+        logger.info(f"[LOG] Starting analysis for {len(dashboards)} dashboards.")
+        self.progress_bar['maximum'] = len(dashboards)
+        ensure_dirs()
         try:
             async with async_playwright() as p:
-                tasks = [self.process_single_dashboard(p, db_data, start_dt, end_dt, semaphore) for db_data in dashboards]
-                await asyncio.gather(*tasks)
-            logger.info("[LOG] All dashboard analyses completed.")
+                for idx, db in enumerate(dashboards):
+                    name = db['name']
+                    for attempt in range(1, 4):  # Up to 3 retries
+                        try:
+                            await self.process_single_dashboard(p, db, start_dt, end_dt)
+                            break
+                        except Exception as e:
+                            logger.warning(f"Attempt {attempt} failed for {name}: {e}")
+                            self.update_dashboard_status(name, f"Retry {attempt} failed: {e}")
+                            if attempt == 3:
+                                self.update_dashboard_status(name, f"Failed after 3 retries")
+                    self.update_progress(idx+1, len(dashboards))
+            self.post_run_cleanup()
             self.update_status("Analysis run has finished.")
             self.master.after(0, lambda: messagebox.showinfo("Complete", "Analysis run has finished."))
         except Exception as e:
             logger.error(f"[LOG] Fatal error during async analysis: {e}", exc_info=True)
             self.update_status(f"Fatal error during analysis: {e}", "error")
 
-    async def process_single_dashboard(self, playwright, db_data, start_dt, end_dt, semaphore):
-        async with semaphore:
-            name = db_data['name']
-            logger.info(f"[LOG] Starting analysis for dashboard '{name}'.")
-            self.update_dashboard_status(name, "Launching...")
-            browser = None
-            try:
-                browser = await playwright.chromium.launch(headless=False)
-                logger.info(f"[LOG] Launched browser for '{name}'.")
-                context = await browser.new_context(ignore_https_errors=True)
-                page = await context.new_page()
-                full_url = self.format_time_for_url(db_data['url'], start_dt, end_dt)
-                logger.info(f"[LOG] Dashboard '{name}' - Navigating to URL: {full_url}")
-                self.update_dashboard_status(name, "Loading Dashboard...")
-                await page.goto(full_url, timeout=120_000)
-                logger.info(f"[LOG] Dashboard '{name}' - Page loaded.")
+    async def process_single_dashboard(self, playwright, db_data, start_dt, end_dt):
+        name = db_data['name']
+        logger.info(f"[LOG] Starting analysis for dashboard '{name}'.")
+        self.update_dashboard_status(name, "Launching...")
+        browser = None
+        try:
+            browser = await playwright.chromium.launch(headless=False)
+            logger.info(f"[LOG] Launched browser for '{name}'.")
+            context = await browser.new_context(ignore_https_errors=True)
+            page = await context.new_page()
+            full_url = self.format_time_for_url(db_data['url'], start_dt, end_dt)
+            logger.info(f"[LOG] Dashboard '{name}' - Navigating to URL: {full_url}")
+            self.update_dashboard_status(name, "Loading Dashboard...")
+            await page.goto(full_url, timeout=120_000)
+            logger.info(f"[LOG] Dashboard '{name}' - Page loaded.")
 
-                username_field = page.locator('input[name="username"]')
-                if await username_field.is_visible(timeout=5000):
-                    self.update_dashboard_status(name, "Logging in...")
-                    logger.info(f"[LOG] Dashboard '{name}' - Login form detected, filling username/password.")
-                    await username_field.fill(self.session['username'])
-                    await page.locator('input[name="password"]').fill(self.session['password'])
-                    submit_button = page.locator('button[type="submit"], input[type="submit"]').first
-                    await submit_button.click()
-                    logger.info(f"[LOG] Dashboard '{name}' - Submitted login form.")
-                    try:
-                        await page.wait_for_url(lambda url: "account/login" not in url, timeout=15000)
-                        logger.info(f"[LOG] Dashboard '{name}' - Login successful.")
-                    except PlaywrightTimeoutError:
-                        self.update_dashboard_status(name, "Error: Login Failed.")
-                        logger.error(f"[LOG] Dashboard '{name}' - Login failed after submit.")
-                        self.handle_login_failure()
-                        return
+            username_field = page.locator('input[name="username"]')
+            if await username_field.is_visible(timeout=5000):
+                self.update_dashboard_status(name, "Logging in...")
+                logger.info(f"[LOG] Dashboard '{name}' - Login form detected, filling username/password.")
+                await username_field.fill(self.session['username'])
+                await page.locator('input[name="password"]').fill(self.session['password'])
+                submit_button = page.locator('button[type="submit"], input[type="submit"]').first
+                await submit_button.click()
+                logger.info(f"[LOG] Dashboard '{name}' - Submitted login form.")
+                try:
+                    await page.wait_for_url(lambda url: "account/login" not in url, timeout=15000)
+                    logger.info(f"[LOG] Dashboard '{name}' - Login successful.")
+                except PlaywrightTimeoutError:
+                    self.update_dashboard_status(name, "Error: Login Failed.")
+                    logger.error(f"[LOG] Dashboard '{name}' - Login failed after submit.")
+                    self.handle_login_failure()
+                    return
 
-                await self._wait_for_splunk_dashboard_to_load(page, name)
-                folder = os.path.join(SCREENSHOT_DIR, datetime.now(est).strftime("%Y-%m-%d"))
-                os.makedirs(folder, exist_ok=True)
-                filename = f"{re.sub('[^A-Za-z0-9]+', '_', name)}_{datetime.now(est).strftime('%H%M%S')}.png"
-                path = os.path.join(folder, filename)
-                logger.info(f"[LOG] Dashboard '{name}' - Taking screenshot: {path}")
-                await page.screenshot(path=path, full_page=True)
-                self.update_dashboard_status(name, f"Success: {filename}")
-                logger.info(f"Screenshot for '{name}' saved to {path}")
+            await self._wait_for_splunk_dashboard_to_load(page, name)
+            filename = f"{re.sub('[^A-Za-z0-9]+', '_', name)}_{datetime.now(est).strftime('%H%M%S')}.png"
+            screenshot_bytes = await page.screenshot(full_page=True)
+            save_screenshot_to_tmp(screenshot_bytes, filename)
+            self.update_dashboard_status(name, f"Success: {filename}")
+            logger.info(f"Screenshot for '{name}' saved to tmp/{filename}")
 
-            except Exception as e:
-                error_msg = f"Error: {str(e).splitlines()[0]}"
-                self.update_dashboard_status(name, error_msg)
-                self.update_status(error_msg, "error")
-                logger.error(f"Error processing '{name}': {e}", exc_info=True)
-            finally:
-                if browser:
-                    try:
-                        await browser.close()
-                        logger.info(f"[LOG] Browser closed for dashboard '{name}'.")
-                    except Exception as e:
-                        logger.warning(f"[LOG] Error closing browser for '{name}': {e}")
-                self.progress_bar.step(1)
-                self.update_progress(self.progress_bar['value'] + 1, self.progress_bar['maximum'])
+        except Exception as e:
+            error_msg = f"Error: {str(e).splitlines()[0]}"
+            self.update_dashboard_status(name, error_msg)
+            self.update_status(error_msg, "error")
+            logger.error(f"Error processing '{name}': {e}", exc_info=True)
+            raise
+        finally:
+            if browser:
+                try:
+                    await browser.close()
+                    logger.info(f"[LOG] Browser closed for dashboard '{name}'.")
+                except Exception as e:
+                    logger.warning(f"[LOG] Error closing browser for '{name}': {e}")
 
     async def _wait_for_splunk_dashboard_to_load(self, page, name):
         self.update_dashboard_status(name, "Waiting for panels...")
@@ -651,38 +701,34 @@ class SplunkAutomatorApp:
             await page.wait_for_selector("div.dashboard-body, splunk-dashboard-view", timeout=120_000)
         except Exception:
             logger.warning(f"[LOG] Dashboard '{name}' - Dashboard body selector not found within timeout.")
-        submit_button = page.locator('button:has-text("Submit"), button:has-text("Apply")').first
-        if await submit_button.is_visible(timeout=5000) and await submit_button.is_enabled(timeout=5000):
-            self.update_dashboard_status(name, "Submitting query...")
-            logger.info(f"[LOG] Dashboard '{name}' - Submitting dashboard query.")
-            await submit_button.click()
-            await page.wait_for_load_state('networkidle', timeout=60_000)
+
         try:
-            await page.wait_for_selector("div.dashboard-panel, splunk-dashboard-panel", state="visible", timeout=120_000)
+            has_enabled_export_buttons = await page.evaluate("""() => {
+                const exportButtons = document.querySelectorAll('.btn-pill.export');
+                if (exportButtons.length === 0) return false;
+                const disabledButtons = document.querySelectorAll('.btn-pill.export.disabled');
+                return exportButtons.length > 0 && disabledButtons.length === 0;
+            }""")
+            if has_enabled_export_buttons:
+                logger.info(f"[LOG] Dashboard '{name}' - Export buttons already enabled, waiting 5 seconds for potential input state...")
+                self.update_dashboard_status(name, "Export enabled, waiting for input...")
+                await asyncio.sleep(5)
+        except Exception as e:
+            logger.warning(f"[LOG] Dashboard '{name}' - Error during export button initial check: {e}")
+
+        try:
+            self.update_dashboard_status(name, "Waiting for export buttons to be enabled...")
+            await page.wait_for_function("""() => {
+                const exportButtons = document.querySelectorAll('.btn-pill.export');
+                if (exportButtons.length === 0) return false;
+                const disabledButtons = document.querySelectorAll('.btn-pill.export.disabled');
+                const editExportButtons = document.querySelectorAll('a.btn.edit-export');
+                return disabledButtons.length === 0 && editExportButtons.length > 0;
+            }""", timeout=120_000)
+            logger.info(f"[LOG] Dashboard '{name}' - Export buttons enabled and edit-export button present.")
         except Exception:
-            logger.warning(f"[LOG] Dashboard '{name}' - Dashboard panel selector not visible within timeout.")
-        loading_indicators = ["Waiting for data", "Loading...", "Searching...", "Loading data", "Rendering"]
-        start_wait = time.time()
-        while time.time() - start_wait < 90:
-            panels = await page.locator("div.dashboard-panel, splunk-dashboard-panel").all()
-            loading_panels = 0
-            for panel in panels:
-                panel_text = await panel.inner_text()
-                if any(indicator in panel_text for indicator in loading_indicators):
-                    loading_panels += 1
-                    continue
-                export_button = panel.locator('button[aria-label*="Export"], a[aria-label*="Export"]').first
-                if await export_button.count() > 0 and not await export_button.is_enabled():
-                    loading_panels += 1
-            if loading_panels == 0:
-                logger.info(f"All panels for '{name}' appear loaded.")
-                await asyncio.sleep(2)
-                return
-            self.update_dashboard_status(name, f"Waiting... ({loading_panels} panels loading)")
-            logger.info(f"[LOG] Dashboard '{name}' - {loading_panels} panels still loading...")
-            await asyncio.sleep(3)
-        self.update_dashboard_status(name, "Warning: Timeout. Taking screenshot.")
-        logger.warning(f"Timed out waiting for dashboard '{name}' to load completely")
+            logger.warning(f"[LOG] Dashboard '{name}' - Export/edit-export button state not reached within timeout.")
+            self.update_dashboard_status(name, "Warning: Timeout waiting for export buttons.")
 
     def format_time_for_url(self, base_url, start_dt, end_dt):
         params = {}
@@ -704,16 +750,20 @@ class SplunkAutomatorApp:
     def _update_status_in_ui(self, name, status):
         for iid in self.treeview.get_children():
             if self.treeview.item(iid)['values'][1] == name:
-                vals = list(self.treeview.item(iid)['values']); vals[4] = status
+                vals = list(self.treeview.item(iid)['values'])
+                vals[4] = status
                 self.treeview.item(iid, values=tuple(vals))
                 for db in self.session['dashboards']:
-                    if db['name'] == name: db['status'] = status; break
+                    if db['name'] == name:
+                        db['status'] = status
+                        break
 
     def update_progress(self, value, maximum=None):
         self.master.after(0, lambda: self._update_progress_in_ui(value, maximum))
 
     def _update_progress_in_ui(self, value, maximum):
-        if maximum is not None: self.progress_bar['maximum'] = maximum
+        if maximum is not None:
+            self.progress_bar['maximum'] = maximum
         self.progress_bar['value'] = value
 
     def handle_login_failure(self):
@@ -744,7 +794,7 @@ class SplunkAutomatorApp:
             "time_hours": time_hours
         }
         try:
-            with open(SCHEDULE_FILE, 'w') as f:
+            with open(SCHEDULE_FILE, 'w', encoding='utf-8') as f:
                 json.dump(schedule_config, f, indent=4)
             messagebox.showinfo("Schedule Saved", f"Analysis scheduled every {interval} minutes.")
             self.scheduled = True
@@ -757,7 +807,7 @@ class SplunkAutomatorApp:
     def start_schedule_if_exists(self):
         if os.path.exists(SCHEDULE_FILE):
             try:
-                with open(SCHEDULE_FILE, 'r') as f:
+                with open(SCHEDULE_FILE, 'r', encoding='utf-8') as f:
                     schedule_config = json.load(f)
                     self.schedule_interval = schedule_config.get("interval_minutes", 60)
                     self.scheduled = True
@@ -770,17 +820,18 @@ class SplunkAutomatorApp:
     def run_scheduled_analysis(self, schedule_config=None):
         if not self.scheduled:
             return
-        if schedule_config:
-            Thread(
-                target=lambda: asyncio.run(
-                    self.analyze_dashboards_async(
-                        [db for db in self.session['dashboards'] if db['name'] in schedule_config['dashboards']],
-                        datetime.now(est) - timedelta(hours=schedule_config['time_hours']),
-                        datetime.now(est)
-                    )
-                ),
-                daemon=True
-            ).start()
+        selected_dbs = [db for db in self.session['dashboards'] if db.get('selected')]
+        if not selected_dbs:
+            logger.warning("Scheduled run skipped: no selected dashboards.")
+            return
+        start_dt = datetime.now(est) - timedelta(hours=schedule_config['time_hours'])
+        end_dt = datetime.now(est)
+        Thread(
+            target=lambda: asyncio.run(
+                self.analyze_dashboards_async(selected_dbs, start_dt, end_dt)
+            ),
+            daemon=True
+        ).start()
         if self.scheduled:
             self.master.after(self.schedule_interval * 60000, self.run_scheduled_analysis, schedule_config)
 
@@ -799,6 +850,10 @@ class SplunkAutomatorApp:
         except Exception as e:
             logger.error(f"Error cancelling schedule: {e}")
             messagebox.showerror("Error", "Could not cancel schedule.")
+
+    def post_run_cleanup(self):
+        move_screenshots_to_archive()
+        purge_old_archives()
 
 # --- Application Entry Point ---
 def on_closing():
