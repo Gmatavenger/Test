@@ -47,7 +47,6 @@ SCHEDULE_FILE = "schedule.json"
 SETTINGS_FILE = "settings.json"
 est = pytz.timezone("America/New_York")
 
-# Screenshot and tmp config
 TMP_DIR = "tmp"
 SCREENSHOT_ARCHIVE_DIR = "screenshots"
 DAYS_TO_KEEP = 3
@@ -55,20 +54,25 @@ DAYS_TO_KEEP = 3
 def ensure_dirs():
     os.makedirs(TMP_DIR, exist_ok=True)
     os.makedirs(SCREENSHOT_ARCHIVE_DIR, exist_ok=True)
+    logger.info(f"Ensured directories exist: {TMP_DIR}, {SCREENSHOT_ARCHIVE_DIR}")
+    logger.info(f"Current working directory: {os.getcwd()}")
 
 def purge_old_archives():
     now = datetime.now()
+    logger.info(f"Purging archives older than {DAYS_TO_KEEP} days. Now: {now}")
     for folder in os.listdir(SCREENSHOT_ARCHIVE_DIR):
         folder_path = os.path.join(SCREENSHOT_ARCHIVE_DIR, folder)
         if not os.path.isdir(folder_path):
             continue
         try:
             folder_date = datetime.strptime(folder, "%Y-%m-%d")
-            if (now - folder_date).days > DAYS_TO_KEEP:
+            age = (now - folder_date).days
+            logger.info(f"Found archive: {folder} (age: {age} days)")
+            if age > DAYS_TO_KEEP:
                 shutil.rmtree(folder_path)
                 logger.info(f"Purged old archive: {folder_path}")
         except ValueError:
-            continue
+            logger.warning(f"Skipping non-date folder: {folder}")
 
 def move_screenshots_to_archive():
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -89,9 +93,6 @@ def save_screenshot_to_tmp(screenshot_bytes, filename):
     logger.info(f"Saved screenshot to {file_path}")
     return file_path
 
-# ------------------------------------------------------------------------------
-# Credential Management (SECURE)
-# ------------------------------------------------------------------------------
 def load_credentials():
     username = keyring.get_password("SplunkAutomator", "username")
     password = keyring.get_password("SplunkAutomator", "password")
@@ -340,6 +341,8 @@ class TimeRangeDialog(Toplevel):
 # Main Application Class and All Methods
 # ------------------------------------------------------------------------------
 class SplunkAutomatorApp:
+    MAX_CONCURRENT_DASHBOARDS = 3  # Adjust concurrency as needed
+
     def __init__(self, master):
         self.master = master
         master.title("Splunk Dashboard Automator")
@@ -530,9 +533,13 @@ class SplunkAutomatorApp:
         self.update_group_filter()
 
     def save_dashboards(self):
-        with open(DASHBOARD_FILE, 'w', encoding='utf-8') as f:
-            dashboards_to_save = [{k: v for k, v in d.items() if k != 'status'} for d in self.session['dashboards']]
-            json.dump(dashboards_to_save, f, indent=4)
+        try:
+            with open(DASHBOARD_FILE, 'w', encoding='utf-8') as f:
+                dashboards_to_save = [{k: v for k, v in d.items() if k != 'status'} for d in self.session['dashboards']]
+                json.dump(dashboards_to_save, f, indent=4)
+        except Exception as exc:
+            logger.exception("Error saving dashboards")
+            messagebox.showerror("Save Error", f"Could not save dashboards: {exc}")
 
     def refresh_dashboard_list(self):
         selected_ids = {iid for iid in self.treeview.selection()}
@@ -608,36 +615,40 @@ class SplunkAutomatorApp:
             messagebox.showerror("Credentials Error", "Splunk credentials are not set.")
             logger.error("Analysis aborted: Splunk credentials not set.")
             return
+        retries = simpledialog.askinteger("Retries", "How many times should each dashboard retry on failure?", initialvalue=3, minvalue=1, parent=self.master)
+        if retries is None:
+            logger.info("User cancelled retries dialog.")
+            return
         self.update_progress(0, len(selected_dbs))
         for db in selected_dbs: 
             self.update_dashboard_status(db['name'], "Queued")
-        logger.info(f"Starting analysis for {len(selected_dbs)} dashboards. Time range: {start_dt} to {end_dt}")
-        Thread(target=lambda: asyncio.run(self.analyze_dashboards_async(selected_dbs, start_dt, end_dt)), daemon=True).start()
+        logger.info(f"Starting analysis for {len(selected_dbs)} dashboards. Time range: {start_dt} to {end_dt}, Retries: {retries}")
+        Thread(target=lambda: asyncio.run(self.analyze_dashboards_async(selected_dbs, start_dt, end_dt, retries)), daemon=True).start()
 
-    async def analyze_dashboards_async(self, dashboards, start_dt, end_dt):
+    async def analyze_dashboards_async(self, dashboards, start_dt, end_dt, retries=3):
         logger.info(f"[LOG] Starting analysis for {len(dashboards)} dashboards.")
         self.progress_bar['maximum'] = len(dashboards)
         ensure_dirs()
-        try:
-            async with async_playwright() as p:
-                for idx, db in enumerate(dashboards):
+        semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_DASHBOARDS)
+        async with async_playwright() as p:
+            async def process_dashboard_wrapper(db, idx):
+                async with semaphore:
                     name = db['name']
-                    for attempt in range(1, 4):  # Up to 3 retries
+                    for attempt in range(1, retries + 1):
                         try:
                             await self.process_single_dashboard(p, db, start_dt, end_dt)
                             break
                         except Exception as e:
                             logger.warning(f"Attempt {attempt} failed for {name}: {e}")
                             self.update_dashboard_status(name, f"Retry {attempt} failed: {e}")
-                            if attempt == 3:
-                                self.update_dashboard_status(name, f"Failed after 3 retries")
+                            if attempt == retries:
+                                self.update_dashboard_status(name, f"Failed after {retries} retries")
                     self.update_progress(idx+1, len(dashboards))
-            self.post_run_cleanup()
-            self.update_status("Analysis run has finished.")
-            self.master.after(0, lambda: messagebox.showinfo("Complete", "Analysis run has finished."))
-        except Exception as e:
-            logger.error(f"[LOG] Fatal error during async analysis: {e}", exc_info=True)
-            self.update_status(f"Fatal error during analysis: {e}", "error")
+            tasks = [process_dashboard_wrapper(db, idx) for idx, db in enumerate(dashboards)]
+            await asyncio.gather(*tasks)
+        self.post_run_cleanup()
+        self.update_status("Analysis run has finished.")
+        self.master.after(0, lambda: messagebox.showinfo("Complete", "Analysis run has finished."))
 
     async def process_single_dashboard(self, playwright, db_data, start_dt, end_dt):
         name = db_data['name']
@@ -788,10 +799,14 @@ class SplunkAutomatorApp:
         if time_hours is None or time_hours < 1:
             messagebox.showerror("Invalid Value", "Hours must be at least 1")
             return
+        retries = simpledialog.askinteger("Retries", "How many times should each dashboard retry on failure?", initialvalue=3, minvalue=1, parent=self.master)
+        if retries is None:
+            return
         schedule_config = {
             "interval_minutes": interval,
             "dashboards": dashboards,
-            "time_hours": time_hours
+            "time_hours": time_hours,
+            "retries": retries
         }
         try:
             with open(SCHEDULE_FILE, 'w', encoding='utf-8') as f:
@@ -826,9 +841,10 @@ class SplunkAutomatorApp:
             return
         start_dt = datetime.now(est) - timedelta(hours=schedule_config['time_hours'])
         end_dt = datetime.now(est)
+        retries = schedule_config.get("retries", 3)
         Thread(
             target=lambda: asyncio.run(
-                self.analyze_dashboards_async(selected_dbs, start_dt, end_dt)
+                self.analyze_dashboards_async(selected_dbs, start_dt, end_dt, retries)
             ),
             daemon=True
         ).start()
