@@ -57,6 +57,30 @@ def ensure_dirs():
     logger.info(f"Ensured directories exist: {TMP_DIR}, {SCREENSHOT_ARCHIVE_DIR}")
     logger.info(f"Current working directory: {os.getcwd()}")
 
+# ------------------------------------------------------------------------------
+# NEW: Archive and clean tmp before run
+# ------------------------------------------------------------------------------
+def archive_and_clean_tmp():
+    """Move all subfolders in tmp (except today's) to screenshots, and clean tmp for the new run."""
+    ensure_dirs()
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    # Move all folders (except today) to archive
+    for folder in os.listdir(TMP_DIR):
+        folder_path = os.path.join(TMP_DIR, folder)
+        if os.path.isdir(folder_path) and folder != today_str:
+            archive_path = os.path.join(SCREENSHOT_ARCHIVE_DIR, folder)
+            # Remove if archive folder exists (shouldn't, but safeguard)
+            if os.path.exists(archive_path):
+                shutil.rmtree(archive_path)
+            shutil.move(folder_path, archive_path)
+            logger.info(f"Archived {folder_path} to {archive_path}")
+    # Remove any loose files (not folders) in tmp
+    for fname in os.listdir(TMP_DIR):
+        fpath = os.path.join(TMP_DIR, fname)
+        if os.path.isfile(fpath):
+            os.remove(fpath)
+            logger.info(f"Removed stray file {fpath} from tmp")
+
 def purge_old_archives():
     now = datetime.now()
     logger.info(f"Purging archives older than {DAYS_TO_KEEP} days. Now: {now}")
@@ -74,20 +98,15 @@ def purge_old_archives():
         except ValueError:
             logger.warning(f"Skipping non-date folder: {folder}")
 
-def move_screenshots_to_archive():
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    target_dir = os.path.join(SCREENSHOT_ARCHIVE_DIR, today_str)
-    os.makedirs(target_dir, exist_ok=True)
-    for fname in os.listdir(TMP_DIR):
-        src = os.path.join(TMP_DIR, fname)
-        dst = os.path.join(target_dir, fname)
-        if os.path.isfile(src):
-            shutil.move(src, dst)
-            logger.info(f"Moved screenshot {src} to {dst}")
-
+# ------------------------------------------------------------------------------
+# CHANGED: Save screenshot to tmp/<today>/
+# ------------------------------------------------------------------------------
 def save_screenshot_to_tmp(screenshot_bytes, filename):
     ensure_dirs()
-    file_path = os.path.join(TMP_DIR, filename)
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    day_tmp_dir = os.path.join(TMP_DIR, today_str)
+    os.makedirs(day_tmp_dir, exist_ok=True)
+    file_path = os.path.join(day_tmp_dir, filename)
     with open(file_path, "wb") as f:
         f.write(screenshot_bytes)
     logger.info(f"Saved screenshot to {file_path}")
@@ -599,7 +618,11 @@ class SplunkAutomatorApp:
         with open(SETTINGS_FILE, "w", encoding='utf-8') as f:
             json.dump(settings, f, indent=4)
 
+    # --------------------------------------------------------------------------
+    # CHANGED: Run archiving and clean-up before each analysis
+    # --------------------------------------------------------------------------
     def run_analysis_thread(self, scheduled_run=False, schedule_config=None):
+        archive_and_clean_tmp()  # <<---- ARCHIVE AND CLEAN TMP BEFORE ANALYSIS!
         selected_dbs = [db for db in self.session['dashboards'] if db.get('selected')]
         if not selected_dbs:
             messagebox.showwarning("No Selection", "Please select dashboards.")
@@ -867,8 +890,10 @@ class SplunkAutomatorApp:
             logger.error(f"Error cancelling schedule: {e}")
             messagebox.showerror("Error", "Could not cancel schedule.")
 
+    # --------------------------------------------------------------------------
+    # CHANGED: Only purge archives in post-run (archiving handled before run)
+    # --------------------------------------------------------------------------
     def post_run_cleanup(self):
-        move_screenshots_to_archive()
         purge_old_archives()
 
 # --- Application Entry Point ---
