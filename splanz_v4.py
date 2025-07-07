@@ -83,7 +83,7 @@ def archive_and_clean_tmp():
 
 def purge_old_archives():
     now = datetime.now()
-    logger.info(f"Purging archives older than {DAYS_TO_KEEP} days. Now: {now}")
+    logger.info(f"Purging contents of archives older than {DAYS_TO_KEEP} days. Now: {now}")
     for folder in os.listdir(SCREENSHOT_ARCHIVE_DIR):
         folder_path = os.path.join(SCREENSHOT_ARCHIVE_DIR, folder)
         if not os.path.isdir(folder_path):
@@ -93,8 +93,19 @@ def purge_old_archives():
             age = (now - folder_date).days
             logger.info(f"Found archive: {folder} (age: {age} days)")
             if age > DAYS_TO_KEEP:
-                shutil.rmtree(folder_path)
-                logger.info(f"Purged old archive: {folder_path}")
+                # Purge all contents, keep the folder itself
+                for filename in os.listdir(folder_path):
+                    file_path = os.path.join(folder_path, filename)
+                    try:
+                        if os.path.isfile(file_path) or os.path.islink(file_path):
+                            os.remove(file_path)
+                            logger.info(f"Deleted file: {file_path}")
+                        elif os.path.isdir(file_path):
+                            shutil.rmtree(file_path)
+                            logger.info(f"Deleted subfolder: {file_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete {file_path}: {e}")
+                logger.info(f"Purged all contents of archive folder: {folder_path} (folder left intact)")
         except ValueError:
             logger.warning(f"Skipping non-date folder: {folder}")
 
