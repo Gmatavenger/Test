@@ -13,7 +13,6 @@ import logging
 from logging.handlers import RotatingFileHandler
 import shutil
 import keyring
-import uuid
 
 try:
     from tkcalendar import DateEntry
@@ -59,31 +58,28 @@ def ensure_dirs():
     logger.info(f"Current working directory: {os.getcwd()}")
 
 # ------------------------------------------------------------------------------
-# ARCHIVING: Move screenshots in tmp to screenshots/<date>/ before run
+# NEW: Archive and clean tmp before run
 # ------------------------------------------------------------------------------
 def archive_and_clean_tmp():
-    """Move all screenshots from tmp to screenshots/<date>/ based on filename, then clear tmp."""
+    """Move all subfolders in tmp (except today's) to screenshots, and clean tmp for the new run."""
     ensure_dirs()
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    # Move all folders (except today) to archive
+    for folder in os.listdir(TMP_DIR):
+        folder_path = os.path.join(TMP_DIR, folder)
+        if os.path.isdir(folder_path) and folder != today_str:
+            archive_path = os.path.join(SCREENSHOT_ARCHIVE_DIR, folder)
+            # Remove if archive folder exists (shouldn't, but safeguard)
+            if os.path.exists(archive_path):
+                shutil.rmtree(archive_path)
+            shutil.move(folder_path, archive_path)
+            logger.info(f"Archived {folder_path} to {archive_path}")
+    # Remove any loose files (not folders) in tmp
     for fname in os.listdir(TMP_DIR):
         fpath = os.path.join(TMP_DIR, fname)
-        if os.path.isfile(fpath) and '_' in fname:
-            # Example: dashboardname_2025-07-07_8a2f3b12.png
-            parts = fname.split('_')
-            if len(parts) >= 3:
-                date_str = parts[-2]
-                try:
-                    datetime.strptime(date_str, "%Y-%m-%d")
-                    archive_folder = os.path.join(SCREENSHOT_ARCHIVE_DIR, date_str)
-                except ValueError:
-                    archive_folder = os.path.join(SCREENSHOT_ARCHIVE_DIR, "misc")
-            else:
-                archive_folder = os.path.join(SCREENSHOT_ARCHIVE_DIR, "misc")
-            os.makedirs(archive_folder, exist_ok=True)
-            shutil.move(fpath, os.path.join(archive_folder, fname))
-            logger.info(f"Archived {fpath} to {archive_folder}")
-        elif os.path.isdir(fpath):
-            shutil.rmtree(fpath)
-            logger.info(f"Removed stray folder {fpath} from tmp")
+        if os.path.isfile(fpath):
+            os.remove(fpath)
+            logger.info(f"Removed stray file {fpath} from tmp")
 
 def purge_old_archives():
     now = datetime.now()
@@ -103,16 +99,14 @@ def purge_old_archives():
             logger.warning(f"Skipping non-date folder: {folder}")
 
 # ------------------------------------------------------------------------------
-# Screenshot naming: dashboardname_date_uuid.png saved to tmp/
+# CHANGED: Save screenshot to tmp/<today>/
 # ------------------------------------------------------------------------------
-def save_screenshot_to_tmp(screenshot_bytes, dashboard_name):
-    """Save screenshot to tmp/ with filename: dashboardname_YYYY-MM-DD_uuid.png"""
+def save_screenshot_to_tmp(screenshot_bytes, filename):
     ensure_dirs()
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    unique_id = uuid.uuid4().hex[:8]  # Short UUID for uniqueness
-    safe_dashboard = re.sub(r'[^A-Za-z0-9]+', '_', dashboard_name)
-    filename = f"{safe_dashboard}_{date_str}_{unique_id}.png"
-    file_path = os.path.join(TMP_DIR, filename)
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    day_tmp_dir = os.path.join(TMP_DIR, today_str)
+    os.makedirs(day_tmp_dir, exist_ok=True)
+    file_path = os.path.join(day_tmp_dir, filename)
     with open(file_path, "wb") as f:
         f.write(screenshot_bytes)
     logger.info(f"Saved screenshot to {file_path}")
@@ -714,10 +708,12 @@ class SplunkAutomatorApp:
                     return
 
             await self._wait_for_splunk_dashboard_to_load(page, name)
+            filename = f"{re.sub('[^A-Za-z0-9]+', '_', name)}_{datetime.now(est).strftime('%H%M%S')}.png"
             screenshot_bytes = await page.screenshot(full_page=True)
-            save_screenshot_to_tmp(screenshot_bytes, name)
-            self.update_dashboard_status(name, f"Success: Screenshot saved")
-            logger.info(f"Screenshot for '{name}' saved to tmp/")
+            save_screenshot_to_tmp(screenshot_bytes, filename)
+            self.update_dashboard_status(name, f"Success: {filename}")
+            logger.info(f"Screenshot for '{name}' saved to tmp/{filename}")
+
         except Exception as e:
             error_msg = f"Error: {str(e).splitlines()[0]}"
             self.update_dashboard_status(name, error_msg)
