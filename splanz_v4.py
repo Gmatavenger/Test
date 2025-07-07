@@ -915,6 +915,7 @@ def on_closing():
 
 if __name__ == "__main__":
     root = tk.Tk()
+    root.minsize(700, 500)  # <--- Add this line!
     app = SplunkAutomatorApp(root)
     root.protocol("WM_DELETE_WINDOW", on_closing)
     root.mainloop()
