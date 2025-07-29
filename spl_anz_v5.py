@@ -503,7 +503,7 @@ class SplunkAutomatorApp:
         dlg.bind("<Escape>", lambda e: cancel())
         self.master.wait_window(dlg)
 
-    def add_dashboard(self):
+    '''def add_dashboard(self):
         """Add a dashboard entry."""
         name = simpledialog.askstring("Input", "Enter dashboard name:")
         if not name or not name.strip():
@@ -521,7 +521,38 @@ class SplunkAutomatorApp:
         self.session['dashboards'].append({"name": name, "url": url, "group": group, "selected": True})
         self.save_dashboards()
         self.refresh_dashboard_list()
-        self.update_group_filter()
+        self.update_group_filter()'''
+
+    def add_dashboard(self):
+    dlg = tk.Toplevel(self.master)
+    dlg.title("Add Dashboard")
+    dlg.transient(self.master)
+    dlg.grab_set()
+    frm = ttk.Frame(dlg, padding=15)
+    frm.pack(fill=tk.BOTH, expand=True)
+    ttk.Label(frm, text="Dashboard name:").grid(row=0, column=0, sticky="e", pady=5)
+    name_var = tk.StringVar()
+    ttk.Entry(frm, textvariable=name_var, width=40).grid(row=0, column=1, pady=5)
+
+    ttk.Label(frm, text="Dashboard URL:").grid(row=1, column=0, sticky="e", pady=5)
+    url_var = tk.StringVar()
+    ttk.Entry(frm, textvariable=url_var, width=40).grid(row=1, column=1, pady=5)
+
+    ttk.Label(frm, text="Group name:").grid(row=2, column=0, sticky="e", pady=5)
+    existing_groups = sorted({d.get("group", "Default") for d in self.session['dashboards']})
+    group_var = tk.StringVar()
+    group_combo = ttk.Combobox(frm, textvariable=group_var, values=existing_groups, width=37)
+    group_combo.grid(row=2, column=1, pady=5)
+    group_combo.set(existing_groups[0] if existing_groups else "Default")
+
+    def on_ok():
+        name = name_var.get().strip()
+        url = url_var.get().strip()
+        group = group_var.get().strip() or "Default"
+        # ... validate and add as before ...
+        dlg.destroy()
+    ttk.Button(frm, text="Add", command=on_ok).grid(row=3, column=0, columnspan=2, pady=10)
+    dlg.wait_window()
 
     def delete_dashboard(self):
         """Delete selected dashboards."""
@@ -866,7 +897,7 @@ class SplunkAutomatorApp:
             logger.info(f"[LOG] Dashboard '{name}' - No additional changes detected during stabilization.")
         logger.info(f"[LOG] Dashboard '{name}' - Dashboard fully loaded.")
 
-    def format_time_for_url(self, base_url: str, start_dt, end_dt) -> str:
+    '''def format_time_for_url(self, base_url: str, start_dt, end_dt) -> str:
         """Format dashboard URL with correct time parameters."""
         params = {}
         if isinstance(start_dt, str):
@@ -879,7 +910,22 @@ class SplunkAutomatorApp:
             params['form.time_field.latest'] = int(end_dt.timestamp())
         full_url = f"{base_url.split('?')[0]}?{urlencode(params)}"
         logger.info(f"[LOG] Composed dashboard URL: {full_url}")
-        return full_url
+        return full_url'''
+
+    def format_time_for_url(self, base_url: str, start_dt, end_dt, is_studio=False) -> str:
+    params = {}
+    param_prefix = "form.global_time" if is_studio else "form.time_field"
+    if isinstance(start_dt, str):
+        params[f'{param_prefix}.earliest'] = start_dt
+    else:
+        params[f'{param_prefix}.earliest'] = int(start_dt.timestamp())
+    if isinstance(end_dt, str):
+        params[f'{param_prefix}.latest'] = end_dt
+    else:
+        params[f'{param_prefix}.latest'] = int(end_dt.timestamp())
+    full_url = f"{base_url.split('?')[0]}?{urlencode(params)}"
+    logger.info(f"[LOG] Composed dashboard URL: {full_url}")
+    return full_url
 
     def update_dashboard_status(self, name: str, status: str):
         self.master.after(0, lambda: self._update_status_in_ui(name, status))
