@@ -13,6 +13,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import shutil
 import keyring
+from cryptography.fernet import Fernet 
 
 try:
     from tkcalendar import DateEntry
@@ -116,7 +117,17 @@ def save_screenshot_to_tmp(screenshot_bytes: bytes, filename: str) -> str:
     logger.info(f"Saved screenshot to {file_path}")
     return file_path
 
-def load_credentials() -> tuple[str|None, str|None]:
+def load_credentials():
+    if not os.path.exists(".secrets"):
+        return None, None
+    key = get_key()
+    f = Fernet(key)
+    with open(".secrets", "rb") as f2:
+        decrypted = f.decrypt(f2.read())
+    data = json.loads(decrypted.decode())
+    return data.get("username"), data.get("password")
+
+'''def load_credentials() -> tuple[str|None, str|None]:
     """Load Splunk credentials from system keyring."""
     try:
         username = keyring.get_password("SplunkAutomator", "username")
@@ -135,7 +146,26 @@ def save_credentials(username: str, password: str) -> bool:
         return True
     except Exception as e:
         logger.error(f"Failed to save credentials: {e}")
-        return False
+        return False'''
+
+def get_key():
+    key_file = ".secrets.key"
+    if os.path.exists(key_file):
+        with open(key_file, "rb") as f:
+            return f.read()
+    key = Fernet.generate_key()
+    with open(key_file, "wb") as f:
+        f.write(key)
+    return key
+
+def save_credentials(username, password):
+    key = get_key()
+    f = Fernet(key)
+    creds = json.dumps({"username": username, "password": password}).encode()
+    encrypted = f.encrypt(creds)
+    with open(".secrets", "wb") as f2:
+        f2.write(encrypted)
+    logger.info("Credentials saved securely (encrypted).")
 
 # ------------------------------------------------------------------------------
 # Time Range Dialog Class - UPDATED FOR SPLUNK TIME MODIFIERS
