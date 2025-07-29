@@ -811,8 +811,26 @@ class SplunkAutomatorApp:
                     return
 
             # In process_single_dashboard
+
             is_studio = await self._wait_for_splunk_dashboard_to_load(page, name)
-            ...
+            filename = f"{re.sub('[^A-Za-z0-9]+', '_', name)}_{datetime.now(Config.EST).strftime('%H%M%S')}.png"
+            if is_studio:
+                try:
+                    height = await page.evaluate("""
+                        () => {
+                            const el = document.querySelector('splunk-dashboard-view');
+                            return el ? el.scrollHeight : document.body.scrollHeight;
+                        }
+                    """)
+                    await page.set_viewport_size({"width": 1280, "height": height})
+                except Exception as e:
+                    logger.warning(f"Could not resize viewport for Studio: {e}")
+                screenshot_bytes = await page.screenshot(full_page=True)
+            else:
+                screenshot_bytes = await page.screenshot(full_page=True)
+            save_screenshot_to_tmp(screenshot_bytes, filename)
+            
+            '''is_studio = await self._wait_for_splunk_dashboard_to_load(page, name)
             if is_studio:
                 # Get scrollHeight of the studio dashboard container
                 height = await page.evaluate("document.querySelector('splunk-dashboard-view').scrollHeight")
@@ -821,10 +839,11 @@ class SplunkAutomatorApp:
                 filename = f"{re.sub('[^A-Za-z0-9]+', '_', name)}_{datetime.now(Config.EST).strftime('%H%M%S')}.png"
                 screenshot_bytes = await page.screenshot(full_page=True)
             else:
-                '''await self._wait_for_splunk_dashboard_to_load(page, name)'''
+                await self._wait_for_splunk_dashboard_to_load(page, name)
                 filename = f"{re.sub('[^A-Za-z0-9]+', '_', name)}_{datetime.now(Config.EST).strftime('%H%M%S')}.png"
                 screenshot_bytes = await page.screenshot(full_page=True)
-            save_screenshot_to_tmp(screenshot_bytes, filename)
+            save_screenshot_to_tmp(screenshot_bytes, filename)'''
+            
             self.update_dashboard_status(name, f"Success: {filename}")
             logger.info(f"Screenshot for '{name}' saved to tmp/{filename}")
 
@@ -854,6 +873,7 @@ class SplunkAutomatorApp:
             logger.info(f"[LOG] Dashboard '{name}' - Detected Splunk Dashboard Studio")
         except Exception:
             logger.info(f"[LOG] Dashboard '{name}' - Detected Splunk Classic Dashboard")
+        return is_studio
 
         try:
             await page.wait_for_selector("splunk-dashboard-view, div.dashboard-body", timeout=120_000)
