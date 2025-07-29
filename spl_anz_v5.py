@@ -466,7 +466,9 @@ class SplunkAutomatorApp:
         self.treeview.bind("<Button-1>", self.toggle_selection)
         analysis_frame = ttk.Frame(main_frame)
         analysis_frame.grid(row=2, column=0, sticky="ew", pady=10)
-        ttk.Button(analysis_frame, text="Analyze Selected", command=self.run_analysis_thread).pack(side=tk.LEFT, padx=5)
+        ttk.Button(analysis_frame, text="Capture Screenshots", command=self.capture_screenshots_thread).pack(side=tk.LEFT, padx=5)
+        ttk.Button(analysis_frame, text="Analyze Dashboards", command=self.run_analysis_thread).pack(side=tk.LEFT, padx=5)
+        '''ttk.Button(analysis_frame, text="Analyze Selected", command=self.run_analysis_thread).pack(side=tk.LEFT, padx=5)'''
         ttk.Button(analysis_frame, text="Schedule Analysis", command=self.schedule_analysis).pack(side=tk.LEFT, padx=5)
         self.progress_bar = ttk.Progressbar(analysis_frame, orient="horizontal", mode="determinate")
         self.progress_bar.pack(fill=tk.X, expand=True, padx=20, side=tk.LEFT)
