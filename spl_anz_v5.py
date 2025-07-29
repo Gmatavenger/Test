@@ -14,6 +14,8 @@ from logging.handlers import RotatingFileHandler
 import shutil
 import keyring
 from cryptography.fernet import Fernet 
+from PIL import Image, ImageDraw, ImageFont
+import io
 
 try:
     from tkcalendar import DateEntry
@@ -105,7 +107,7 @@ def purge_old_archives() -> None:
         except ValueError:
             logger.warning(f"Skipping non-date folder: {folder}")
 
-def save_screenshot_to_tmp(screenshot_bytes: bytes, filename: str) -> str:
+'''def save_screenshot_to_tmp(screenshot_bytes: bytes, filename: str) -> str:
     """Save screenshot bytes to today's tmp directory."""
     ensure_dirs()
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -114,6 +116,22 @@ def save_screenshot_to_tmp(screenshot_bytes: bytes, filename: str) -> str:
     file_path = os.path.join(day_tmp_dir, filename)
     with open(file_path, "wb") as f:
         f.write(screenshot_bytes)
+    logger.info(f"Saved screenshot to {file_path}")
+    return file_path'''
+
+def save_screenshot_to_tmp(screenshot_bytes: bytes, filename: str) -> str:
+    ensure_dirs()
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    day_tmp_dir = os.path.join(Config.TMP_DIR, today_str)
+    os.makedirs(day_tmp_dir, exist_ok=True)
+    file_path = os.path.join(day_tmp_dir, filename)
+    # Overlay timestamp
+    image = Image.open(io.BytesIO(screenshot_bytes))
+    draw = ImageDraw.Draw(image)
+    timestamp = datetime.now(Config.EST).strftime("%Y-%m-%d %H:%M:%S %Z")
+    font = ImageFont.truetype("arial.ttf", 24) if os.path.exists("arial.ttf") else None
+    draw.text((10, 10), f"Captured: {timestamp}", fill="white", font=font)
+    image.save(file_path)
     logger.info(f"Saved screenshot to {file_path}")
     return file_path
 
