@@ -810,9 +810,20 @@ class SplunkAutomatorApp:
                     self.handle_login_failure()
                     return
 
-            await self._wait_for_splunk_dashboard_to_load(page, name)
-            filename = f"{re.sub('[^A-Za-z0-9]+', '_', name)}_{datetime.now(Config.EST).strftime('%H%M%S')}.png"
-            screenshot_bytes = await page.screenshot(full_page=True)
+            # In process_single_dashboard
+            is_studio = await self._wait_for_splunk_dashboard_to_load(page, name)
+            ...
+            if is_studio:
+                # Get scrollHeight of the studio dashboard container
+                height = await page.evaluate("document.querySelector('splunk-dashboard-view').scrollHeight")
+                # Optionally clamp to a max height if needed
+                await page.set_viewport_size({"width": 1280, "height": height})
+                filename = f"{re.sub('[^A-Za-z0-9]+', '_', name)}_{datetime.now(Config.EST).strftime('%H%M%S')}.png"
+                screenshot_bytes = await page.screenshot(full_page=True)
+            else:
+                '''await self._wait_for_splunk_dashboard_to_load(page, name)'''
+                filename = f"{re.sub('[^A-Za-z0-9]+', '_', name)}_{datetime.now(Config.EST).strftime('%H%M%S')}.png"
+                screenshot_bytes = await page.screenshot(full_page=True)
             save_screenshot_to_tmp(screenshot_bytes, filename)
             self.update_dashboard_status(name, f"Success: {filename}")
             logger.info(f"Screenshot for '{name}' saved to tmp/{filename}")
