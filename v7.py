@@ -25,7 +25,7 @@
 # playwright: For controlling a web browser to interact with Splunk.
 
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog, Toplevel
+from tkinter import ttk, messagebox, simpledialog, Toplevel, Listbox
 import asyncio
 from datetime import datetime, timedelta, time as dt_time
 import pytz
@@ -267,25 +267,28 @@ def load_credentials() -> Tuple[Optional[str], Optional[str]]:
 # SECTION 3: GUI DIALOGS (Pop-up windows)
 # =============================================================================
 
+# --- ENHANCEMENT ---
+# Replaced Checkboxes with a more scalable Listbox for list selection.
+# This makes adding/editing dashboards with many possible lists much cleaner.
 class DashboardAddDialog(Toplevel):
     """A dialog window for adding a new dashboard to the application."""
     def __init__(self, parent, app_instance):
         super().__init__(parent)
         self.title("Add New Dashboard")
-        self.app = app_instance # A reference to the main app to access its data
+        self.app = app_instance
         self.configure(bg=self.app.current_theme['bg'])
 
-        self.transient(parent) # This dialog stays on top of the main window.
-        self.grab_set() # This dialog blocks interaction with the main window.
+        self.transient(parent)
+        self.grab_set()
         
         self._create_ui()
+        self.update_list_box()
 
     def _create_ui(self):
-        """Creates all the widgets (buttons, text boxes) for the dialog."""
+        """Creates all the widgets for the dialog."""
         main_frame = ttk.Frame(self, padding="20")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # --- Input fields for dashboard details ---
         ttk.Label(main_frame, text="Dashboard Name:").grid(row=0, column=0, sticky="w", pady=5)
         self.name_var = tk.StringVar()
         ttk.Entry(main_frame, textvariable=self.name_var, width=50).grid(row=0, column=1, sticky="ew")
@@ -294,69 +297,78 @@ class DashboardAddDialog(Toplevel):
         self.url_var = tk.StringVar()
         ttk.Entry(main_frame, textvariable=self.url_var, width=50).grid(row=1, column=1, sticky="ew")
 
-        # --- Checkboxes for selecting which lists this dashboard belongs to ---
         ttk.Label(main_frame, text="Add to Lists:").grid(row=2, column=0, sticky="nw", pady=(15, 5))
-        self.lists_frame = ttk.Frame(main_frame)
-        self.lists_frame.grid(row=2, column=1, sticky="ew")
         
-        self.list_vars = {} # This dictionary will hold the state (checked/unchecked) of each checkbox.
-        self.update_list_checkboxes()
+        # --- ENHANCEMENT --- Use a Listbox for multi-selection
+        list_frame = ttk.Frame(main_frame)
+        list_frame.grid(row=2, column=1, sticky="nsew")
+        list_frame.grid_rowconfigure(0, weight=1)
+        list_frame.grid_columnconfigure(0, weight=1)
 
-        # --- Section to add a new list category on the fly ---
+        self.list_box = Listbox(list_frame, selectmode=tk.MULTIPLE, exportselection=False)
+        list_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.list_box.yview)
+        self.list_box.configure(yscrollcommand=list_scroll.set)
+        
+        self.list_box.grid(row=0, column=0, sticky="nsew")
+        list_scroll.grid(row=0, column=1, sticky="ns")
+
         new_list_frame = ttk.Frame(main_frame)
         new_list_frame.grid(row=3, column=1, sticky="ew", pady=(10, 0))
         self.new_list_var = tk.StringVar()
         ttk.Entry(new_list_frame, textvariable=self.new_list_var).pack(side=tk.LEFT, expand=True, fill=tk.X)
         ttk.Button(new_list_frame, text="Add New List", command=self.add_new_list).pack(side=tk.LEFT, padx=(5,0))
 
-        # --- 'Add' and 'Cancel' buttons ---
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=4, column=0, columnspan=2, pady=20, sticky="e")
         ttk.Button(button_frame, text="Add Dashboard", command=self.on_add, style="Accent.TButton").pack(side=tk.RIGHT)
         ttk.Button(button_frame, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=5)
 
-    def update_list_checkboxes(self):
-        """Populates the list selection area with checkboxes for each existing list."""
-        for widget in self.lists_frame.winfo_children():
-            widget.destroy()
+    def update_list_box(self, selected_lists=None):
+        """Populates the listbox with all available lists."""
+        if selected_lists is None:
+            selected_lists = {'Default'}
 
-        # Get all unique list names from the existing dashboards.
-        existing_lists = set(['Default'])
-        for dashboard in self.app.session['dashboards']:
-            existing_lists.update(dashboard.get('lists', []))
-
-        # Create a checkbox for each list.
-        for i, list_name in enumerate(sorted(existing_lists)):
-            var = tk.BooleanVar(value=(list_name == 'Default'))
-            self.list_vars[list_name] = var
-            cb = ttk.Checkbutton(self.lists_frame, text=list_name, variable=var)
-            cb.grid(row=i // 3, column=i % 3, sticky="w", padx=5, pady=2) # Arrange in 3 columns
+        self.list_box.delete(0, tk.END)
+        
+        self.all_lists = sorted(list(self.app.get_all_dashboard_lists()))
+        for i, list_name in enumerate(self.all_lists):
+            self.list_box.insert(tk.END, list_name)
+            if list_name in selected_lists:
+                self.list_box.selection_set(i)
 
     def add_new_list(self):
-        """Handles the logic for the 'Add New List' button."""
+        """Handles logic for adding a new list category."""
         new_list_name = self.new_list_var.get().strip()
         if not new_list_name:
             messagebox.showwarning("Invalid Name", "Please enter a list name.", parent=self)
             return
-        if new_list_name in self.list_vars:
+        
+        if new_list_name in self.all_lists:
             messagebox.showinfo("Exists", "This list already exists.", parent=self)
+            # --- ENHANCEMENT --- Select the existing list if user tries to re-add it
+            try:
+                idx = self.all_lists.index(new_list_name)
+                self.list_box.selection_set(idx)
+            except ValueError:
+                pass # Should not happen if check passed
             return
         
-        # Add the new list and refresh the checkboxes.
-        self.list_vars[new_list_name] = tk.BooleanVar(value=True)
+        self.all_lists.append(new_list_name)
+        self.all_lists.sort()
+        new_idx = self.all_lists.index(new_list_name)
+
+        self.list_box.insert(new_idx, new_list_name)
+        self.list_box.selection_set(new_idx)
         self.new_list_var.set("")
-        self.update_list_checkboxes()
-        # Ensure the newly added list's checkbox is automatically checked.
-        if new_list_name in self.list_vars:
-            self.list_vars[new_list_name].set(True)
 
     def on_add(self):
-        """Validates input and adds the new dashboard to the main application."""
+        """Validates input and adds the new dashboard."""
         name = self.name_var.get().strip()
         url = self.url_var.get().strip()
-        selected_lists = [lname for lname, lvar in self.list_vars.items() if lvar.get()]
+        
+        selected_indices = self.list_box.curselection()
+        selected_lists = [self.list_box.get(i) for i in selected_indices]
 
-        # --- Input Validation ---
         if not name or not url:
             messagebox.showerror("Input Error", "Dashboard Name and URL are required.", parent=self)
             return
@@ -370,13 +382,70 @@ class DashboardAddDialog(Toplevel):
             messagebox.showerror("Input Error", "At least one list must be selected.", parent=self)
             return
 
-        # Add the dashboard and refresh the main window's list.
-        new_dashboard = {"name": name, "url": url, "lists": selected_lists, "selected": True}
+        new_dashboard = {"id": str(uuid.uuid4()), "name": name, "url": url, "lists": selected_lists, "selected": True}
         self.app.session['dashboards'].append(new_dashboard)
         self.app.save_dashboards()
         self.app.refresh_dashboard_list()
         self.app.update_list_filter()
-        self.destroy() # Close the dialog.
+        self.destroy()
+
+# --- ENHANCEMENT --- Added a new dialog for editing existing dashboards.
+class DashboardEditDialog(DashboardAddDialog):
+    """A dialog window for editing an existing dashboard."""
+    def __init__(self, parent, app_instance, dashboard_to_edit: Dict):
+        self.dashboard_to_edit = dashboard_to_edit
+        self.original_name = dashboard_to_edit['name']
+        super().__init__(parent, app_instance)
+        self.title("Edit Dashboard")
+
+    def _create_ui(self):
+        """Creates and pre-fills the widgets for the dialog."""
+        super()._create_ui()
+
+        # Pre-fill the fields with existing dashboard data
+        self.name_var.set(self.dashboard_to_edit.get("name", ""))
+        self.url_var.set(self.dashboard_to_edit.get("url", ""))
+
+        # Update button text and command
+        save_button = self.nametowidget('!dashboardeditdialog.!frame.!frame4.!button')
+        save_button.configure(text="Save Changes", command=self.on_save)
+        
+        # Populate and select the lists
+        self.update_list_box(set(self.dashboard_to_edit.get('lists', [])))
+        
+    def on_save(self):
+        """Validates input and saves changes to the dashboard."""
+        new_name = self.name_var.get().strip()
+        new_url = self.url_var.get().strip()
+        selected_indices = self.list_box.curselection()
+        new_lists = [self.list_box.get(i) for i in selected_indices]
+
+        if not new_name or not new_url:
+            messagebox.showerror("Input Error", "Dashboard Name and URL are required.", parent=self)
+            return
+        
+        # Check for name duplication, excluding the current dashboard being edited
+        if new_name.lower() != self.original_name.lower() and \
+           any(d["name"].strip().lower() == new_name.lower() for d in self.app.session["dashboards"]):
+            messagebox.showerror("Input Error", "Another dashboard with this name already exists.", parent=self)
+            return
+            
+        if not new_lists:
+            messagebox.showerror("Input Error", "At least one list must be selected.", parent=self)
+            return
+
+        # Find the original dashboard and update it
+        for i, db in enumerate(self.app.session['dashboards']):
+            if db.get('id') == self.dashboard_to_edit.get('id'):
+                self.app.session['dashboards'][i]['name'] = new_name
+                self.app.session['dashboards'][i]['url'] = new_url
+                self.app.session['dashboards'][i]['lists'] = new_lists
+                break
+        
+        self.app.save_dashboards()
+        self.app.refresh_dashboard_list()
+        self.app.update_list_filter()
+        self.destroy()
 
 class ScheduleConfigDialog(Toplevel):
     """A dialog for creating or editing a single analysis schedule."""
@@ -601,8 +670,10 @@ class SplunkAutomatorApp:
 
         controls_frame = ttk.Frame(top_frame)
         controls_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        # Add icons for a cleaner look.
+        
+        # --- ENHANCEMENT --- Added 'Edit' button to the controls.
         ttk.Button(controls_frame, text="➕ Add", command=self.add_dashboard, width=8).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(controls_frame, text="✏️ Edit", command=self.edit_dashboard, width=8).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(controls_frame, text="🗑️ Delete", command=self.delete_dashboard, width=8).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(controls_frame, text="☑️ Select All", command=self.select_all_dashboards).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(controls_frame, text="☐ Deselect All", command=self.deselect_all_dashboards).pack(side=tk.LEFT, padx=(0, 5))
@@ -733,21 +804,43 @@ class SplunkAutomatorApp:
 
     # --- Dashboard and List Management ---
     
+    def get_all_dashboard_lists(self) -> set:
+        """Returns a set of all unique list names from dashboards."""
+        all_lists = set(['Default'])
+        for dashboard in self.session['dashboards']:
+            all_lists.update(dashboard.get('lists', []))
+        return all_lists
+        
     def add_dashboard(self):
         """Opens the 'Add Dashboard' dialog."""
         DashboardAddDialog(self.master, self)
 
+    # --- ENHANCEMENT --- Added method to open the new Edit Dashboard dialog.
+    def edit_dashboard(self):
+        """Opens the 'Edit Dashboard' dialog for the selected dashboard."""
+        selected_dbs = [db for db in self.session['dashboards'] if db.get('selected', False)]
+        
+        if len(selected_dbs) == 0:
+            messagebox.showwarning("No Selection", "Please select one dashboard to edit using the checkbox.")
+            return
+        if len(selected_dbs) > 1:
+            messagebox.showwarning("Multiple Selections", "Please select only one dashboard to edit.")
+            return
+            
+        DashboardEditDialog(self.master, self, selected_dbs[0])
+
+    # --- ENHANCEMENT --- Fixed delete bug by using the internal 'selected' state
+    # instead of the Treeview's visual selection, which was the source of the bug.
     def delete_dashboard(self):
-        """Deletes all selected dashboards from the list."""
-        selection = self.treeview.selection()
-        if not selection:
-            messagebox.showwarning("No Selection", "Please select dashboards to delete.")
+        """Deletes all dashboards selected via checkbox from the list."""
+        dashboards_to_delete = [db for db in self.session['dashboards'] if db.get('selected', False)]
+        
+        if not dashboards_to_delete:
+            messagebox.showwarning("No Selection", "Please select dashboards to delete using the checkboxes.")
             return
 
-        if messagebox.askyesno("Confirm Delete", f"Delete {len(selection)} dashboard(s)? This cannot be undone."):
-            # Get the unique names of dashboards to delete from the treeview.
-            names_to_delete = {self.treeview.item(item_id)['values'][1] for item_id in selection}
-            # Recreate the dashboard list, excluding the ones marked for deletion.
+        if messagebox.askyesno("Confirm Delete", f"Delete {len(dashboards_to_delete)} dashboard(s)? This cannot be undone."):
+            names_to_delete = {db['name'] for db in dashboards_to_delete}
             self.session['dashboards'] = [db for db in self.session['dashboards'] if db['name'] not in names_to_delete]
             self.save_dashboards()
             self.refresh_dashboard_list()
@@ -791,20 +884,25 @@ class SplunkAutomatorApp:
             self.treeview.delete(item)
 
         selected_filter = self.list_filter_var.get()
-        for dashboard in self.session['dashboards']:
+        
+        # --- ENHANCEMENT --- Ensure dashboards have a unique ID for reliable editing
+        for db in self.session['dashboards']:
+            if 'id' not in db:
+                db['id'] = str(uuid.uuid4())
+        
+        for dashboard in sorted(self.session['dashboards'], key=lambda x: x['name'].lower()):
             dashboard_lists = dashboard.get('lists', ['Default'])
             if selected_filter == "All" or selected_filter in dashboard_lists:
                 selected_char = "☑" if dashboard.get("selected", False) else "☐"
                 status = dashboard.get('status', 'Ready')
-                self.treeview.insert("", "end", values=(selected_char, dashboard['name'], dashboard['url'], ", ".join(dashboard_lists), status))
+                self.treeview.insert("", "end", iid=dashboard['id'], values=(selected_char, dashboard['name'], dashboard['url'], ", ".join(dashboard_lists), status))
         
         self.update_status_summary()
 
     def update_list_filter(self):
         """Updates the 'Filter by List' dropdown with all available list names."""
-        all_lists = set(['All', 'Default'])
-        for dashboard in self.session['dashboards']:
-            all_lists.update(dashboard.get('lists', []))
+        all_lists = self.get_all_dashboard_lists()
+        all_lists.add("All") # Ensure "All" is always an option
         
         sorted_lists = sorted(list(all_lists))
         self.list_filter['values'] = sorted_lists
@@ -856,8 +954,10 @@ class SplunkAutomatorApp:
 
         # Run the actual browser automation in a separate thread to avoid freezing the UI.
         def run_async_job():
-            asyncio.run(self._process_dashboards_async(selected_dbs, time_range, retry_count, add_watermark=capture_only, wait_full_load=not capture_only, operation_name=job_type))
-        
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self._process_dashboards_async(selected_dbs, time_range, retry_count, add_watermark=capture_only, wait_full_load=not capture_only, operation_name=job_type))
+
         Thread(target=run_async_job, name=f"{job_type}-thread", daemon=True).start()
 
     async def _process_dashboards_async(self, dashboards: List[Dict], time_range: Dict, retries: int, add_watermark: bool, wait_full_load: bool, operation_name: str):
@@ -928,8 +1028,11 @@ class SplunkAutomatorApp:
                 save_screenshot_with_watermark(screenshot_bytes, filename)
             else:
                 # Save without a watermark for analysis.
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                day_tmp_dir = os.path.join(Config.TMP_DIR, today_str)
+                os.makedirs(day_tmp_dir, exist_ok=True)
                 image = Image.open(io.BytesIO(screenshot_bytes))
-                image.save(os.path.join(Config.TMP_DIR, datetime.now().strftime("%Y-%m-%d"), filename))
+                image.save(os.path.join(day_tmp_dir, filename))
 
             self.update_dashboard_status(name, f"✅ Success")
         finally:
@@ -983,25 +1086,56 @@ class SplunkAutomatorApp:
     # --- Helper Functions and State Management ---
     
     def manage_credentials(self, first_time: bool = False):
-        # This is identical to the dialog in Section 3, just called from the main app.
-        DashboardAddDialog(self.master, self)
+        dialog = Toplevel(self.master)
+        dialog.title("Manage Credentials")
+        
+        main_frame = ttk.Frame(dialog, padding="20")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(main_frame, text="Splunk Username:").grid(row=0, column=0, sticky="w", pady=5)
+        user_var = tk.StringVar(value=self.username)
+        ttk.Entry(main_frame, textvariable=user_var, width=40).grid(row=0, column=1, sticky="ew")
+
+        ttk.Label(main_frame, text="Splunk Password:").grid(row=1, column=0, sticky="w", pady=5)
+        pass_var = tk.StringVar(value=self.password)
+        ttk.Entry(main_frame, textvariable=pass_var, show="*", width=40).grid(row=1, column=1, sticky="ew")
+
+        def on_save():
+            username, password = user_var.get(), pass_var.get()
+            if save_credentials(username, password):
+                self.username = username
+                self.password = password
+                self.session['username'] = username
+                self.session['password'] = password
+                self.connection_status.config(foreground="green")
+                messagebox.showinfo("Success", "Credentials saved securely.", parent=dialog)
+                dialog.destroy()
+            else:
+                messagebox.showerror("Error", "Failed to save credentials.", parent=dialog)
+
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=2, column=0, columnspan=2, pady=20, sticky="e")
+        ttk.Button(button_frame, text="Save", command=on_save, style="Accent.TButton").pack(side=tk.RIGHT)
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=5)
+        
+        if first_time:
+            messagebox.showinfo("Setup", "Please enter your Splunk credentials to begin.", parent=dialog)
 
     def update_dashboard_status(self, dashboard_name: str, status: str):
         """Updates a dashboard's status in the UI list safely from any thread."""
         def update_ui():
-            # Update the status in the main data list.
+            dashboard_id = None
             for db in self.session['dashboards']:
                 if db['name'] == dashboard_name:
                     db['status'] = status
+                    dashboard_id = db.get('id')
                     break
-            # Find the corresponding row in the visible tree and update it.
-            for item_id in self.treeview.get_children():
-                if self.treeview.item(item_id)['values'][1] == dashboard_name:
-                    current_values = list(self.treeview.item(item_id)['values'])
-                    current_values[4] = status
-                    self.treeview.item(item_id, values=tuple(current_values))
-                    break
-        # `after(0, ...)` ensures this UI update runs on the main GUI thread.
+            
+            if dashboard_id and self.treeview.exists(dashboard_id):
+                current_values = list(self.treeview.item(dashboard_id)['values'])
+                current_values[4] = status
+                self.treeview.item(dashboard_id, values=tuple(current_values))
+
         self.master.after(0, update_ui)
     
     def update_status_summary(self):
@@ -1021,7 +1155,6 @@ class SplunkAutomatorApp:
             return {}
         try:
             with open(Config.SCHEDULE_FILE, 'r') as f:
-                # The file stores a list, we convert it to a dictionary keyed by ID.
                 schedules_list = json.load(f)
                 return {s['id']: s for s in schedules_list}
         except (json.JSONDecodeError, OSError, KeyError) as e:
@@ -1032,7 +1165,6 @@ class SplunkAutomatorApp:
         """Saves all schedules from the dictionary back to the JSON file."""
         try:
             with open(Config.SCHEDULE_FILE, 'w') as f:
-                # Convert the dictionary back to a list for storage.
                 json.dump(list(self.schedules.values()), f, indent=4)
         except OSError as e:
             logger.error(f"Error saving schedules: {e}")
@@ -1045,9 +1177,10 @@ class SplunkAutomatorApp:
         try:
             with open(Config.DASHBOARD_FILE, 'r', encoding='utf-8') as f:
                 dashboards = json.load(f)
-            # This handles migrating data from an older format if necessary.
+            
             for db in dashboards:
                 if 'lists' not in db: db['lists'] = ['Default']
+                if 'id' not in db: db['id'] = str(uuid.uuid4()) # Ensure old dashboards get an ID
             self.session['dashboards'] = dashboards
         except (json.JSONDecodeError, OSError) as e:
             logger.error(f"Error loading dashboards: {e}")
@@ -1057,7 +1190,6 @@ class SplunkAutomatorApp:
         """Saves the current list of dashboards to its JSON file."""
         try:
             with open(Config.DASHBOARD_FILE, 'w', encoding='utf-8') as f:
-                # Don't save temporary runtime status to the file.
                 dashboards_to_save = [{k: v for k, v in db.items() if k != 'status'} for db in self.session['dashboards']]
                 json.dump(dashboards_to_save, f, indent=4)
         except OSError as e:
